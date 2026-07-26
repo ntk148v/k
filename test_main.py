@@ -1,6 +1,9 @@
+import io
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import main
 
@@ -43,3 +46,30 @@ class ToolTests(unittest.TestCase):
 
     def test_bash_returns_combined_output(self):
         self.assertIn("hello", main.bash("python -c \"print('hello')\""))
+
+
+class AgentTests(unittest.TestCase):
+    def test_dispatch_reports_bad_json_and_unknown_tools(self):
+        self.assertIn("invalid JSON", main.dispatch_tool("read", "{", "call-1")["output"])
+        self.assertIn("Unknown tool", main.dispatch_tool("missing", "{}", "call-2")["output"])
+
+    def test_run_agent_returns_final_text_after_a_tool_call(self):
+        call = SimpleNamespace(type="function_call", name="bash", arguments='{"command": "echo hello"}', call_id="call-1")
+        first = SimpleNamespace(id="resp-1", output=[call], output_text="")
+        second = SimpleNamespace(id="resp-2", output=[], output_text="Done")
+        client = SimpleNamespace(responses=SimpleNamespace(create=Mock(side_effect=[first, second])))
+
+        with patch.object(main, "bash", return_value="hello"):
+            self.assertEqual(main.run_agent("say hello", client), "Done")
+
+        first_call, second_call = client.responses.create.call_args_list
+        self.assertEqual(first_call.kwargs["instructions"], main.SYSTEM_PROMPT)
+        self.assertEqual(first_call.kwargs["tools"], main.TOOLS)
+        self.assertEqual(second_call.kwargs["previous_response_id"], "resp-1")
+        self.assertEqual(second_call.kwargs["input"][0]["call_id"], "call-1")
+
+    def test_render_has_no_ansi_when_stdout_is_not_a_tty(self):
+        with patch.object(main.sys.stdout, "isatty", return_value=False), patch("sys.stdout", new_callable=io.StringIO) as output:
+            main.render("tool", "read file.txt")
+        self.assertNotIn("\x1b[", output.getvalue())
+        self.assertIn("read file.txt", output.getvalue())

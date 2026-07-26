@@ -1,7 +1,9 @@
 import base64
+import json
 import mimetypes
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -168,6 +170,116 @@ TOOL_HANDLERS = {
     "edit": edit,
     "bash": bash,
 }
+
+SYSTEM_PROMPT = """You are an expert coding assistant. You help users with coding tasks by reading files, executing commands, editing code, and writing new files.
+
+Available tools:
+- read: Read file contents
+- bash: Execute bash commands
+- edit: Make surgical edits to files
+- write: Create or overwrite files
+
+Guidelines:
+- Use bash for file operations like ls, grep, find
+- Use read to examine files before editing
+- Use edit for precise changes (old text must match exactly)
+- Use write only for new files or complete rewrites
+- When summarizing your actions, output plain text directly - do NOT use cat or bash to display what you did
+- Be concise in your responses
+- Show file paths clearly when working with files"""
+
+
+def dispatch_tool(name: str, arguments: str, call_id: str) -> dict:
+    try:
+        args = json.loads(arguments)
+    except json.JSONDecodeError as e:
+        return {
+            "type": "function_call_output",
+            "call_id": call_id,
+            "output": f"Error: invalid JSON in arguments: {e}",
+        }
+    handler = TOOL_HANDLERS.get(name)
+    if handler is None:
+        return {
+            "type": "function_call_output",
+            "call_id": call_id,
+            "output": f"Error: Unknown tool: {name}",
+        }
+    try:
+        result = handler(**args)
+    except Exception as e:
+        return {
+            "type": "function_call_output",
+            "call_id": call_id,
+            "output": f"Error: {e}",
+        }
+    if isinstance(result, list):
+        return {"type": "function_call_output", "call_id": call_id, "output": result}
+    return {
+        "type": "function_call_output",
+        "call_id": call_id,
+        "output": result,
+    }
+
+
+def render(kind: str, text: str) -> None:
+    is_tty = sys.stdout.isatty()
+    if kind == "title":
+        if is_tty:
+            sys.stdout.write(f"\033[2m{text}\033[0m\n")
+        else:
+            sys.stdout.write(f"{text}\n")
+    elif kind == "tool":
+        if is_tty:
+            sys.stdout.write(f"  \033[36m{text}\033[0m\n")
+        else:
+            sys.stdout.write(f"  {text}\n")
+    elif kind == "output":
+        if is_tty:
+            sys.stdout.write(f"\033[33m{text}\033[0m\n")
+        else:
+            sys.stdout.write(f"{text}\n")
+    elif kind == "answer":
+        sys.stdout.write(f"{text}\n")
+    sys.stdout.flush()
+
+
+def run_agent(task: str, client: OpenAI) -> str:
+    response = client.responses.create(
+        model="openrouter/free",
+        instructions=SYSTEM_PROMPT,
+        input=task,
+        tools=TOOLS,
+    )
+    while calls := [item for item in response.output if item.type == "function_call"]:
+        tool_outputs = [
+            dispatch_tool(call.name, call.arguments, call.call_id) for call in calls
+        ]
+        for call in calls:
+            render("tool", f"{call.name}({call.arguments})")
+        response = client.responses.create(
+            model="openrouter/free",
+            previous_response_id=response.id,
+            input=tool_outputs,
+            tools=TOOLS,
+        )
+    return response.output_text
+
+
+def main() -> None:
+    load_dotenv()
+    render("title", "k")
+    task = input("\u203a ").strip()
+    if not task:
+        return
+    client = OpenAI()
+    try:
+        result = run_agent(task, client)
+    except Exception as e:
+        render("output", f"Error: {e}")
+        raise SystemExit(1)
+    render("answer", result)
+
 
 if __name__ == "__main__":
     main()
