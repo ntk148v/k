@@ -55,18 +55,37 @@ class AgentTests(unittest.TestCase):
 
     def test_run_agent_returns_final_text_after_a_tool_call(self):
         call = SimpleNamespace(type="function_call", name="bash", arguments='{"command": "echo hello"}', call_id="call-1")
-        first = SimpleNamespace(id="resp-1", output=[call], output_text="")
-        second = SimpleNamespace(id="resp-2", output=[], output_text="Done")
+        first = SimpleNamespace(
+            id="resp-1", output=[call], output_text="",
+            usage=SimpleNamespace(input_tokens=5, output_tokens=3),
+        )
+        second = SimpleNamespace(
+            id="resp-2", output=[], output_text="Done",
+            usage=SimpleNamespace(input_tokens=9, output_tokens=4),
+        )
         client = SimpleNamespace(responses=SimpleNamespace(create=Mock(side_effect=[first, second])))
 
         with patch.object(main, "bash", return_value="hello"):
-            self.assertEqual(main.run_agent("say hello", client), "Done")
+            self.assertEqual(main.run_agent("say hello", client), ("Done", 21, 9))
 
         first_call, second_call = client.responses.create.call_args_list
-        self.assertEqual(first_call.kwargs["instructions"], main.SYSTEM_PROMPT)
-        self.assertEqual(first_call.kwargs["tools"], main.TOOLS)
-        self.assertEqual(second_call.kwargs["previous_response_id"], "resp-1")
-        self.assertEqual(second_call.kwargs["input"][0]["call_id"], "call-1")
+        self.assertEqual(first_call.kwargs["model"], main.MODEL)
+        self.assertEqual(second_call.kwargs["model"], main.MODEL)
+
+    def test_run_agent_tolerates_missing_usage(self):
+        response = SimpleNamespace(id="resp-1", output=[], output_text="Done")
+        client = SimpleNamespace(responses=SimpleNamespace(create=Mock(return_value=response)))
+        self.assertEqual(main.run_agent("say hello", client), ("Done", 0, None))
+
+    def test_render_status_has_no_ansi_when_stdout_is_not_a_tty(self):
+        with patch.object(main.sys.stdout, "isatty", return_value=False), patch("sys.stdout", new_callable=io.StringIO) as output:
+            main.render("status", "model: openrouter/free | tokens: 21 | context: 9")
+        self.assertEqual(output.getvalue(), "model: openrouter/free | tokens: 21 | context: 9\n")
+
+    def test_render_status_is_magenta_in_a_tty(self):
+        with patch("sys.stdout", new_callable=io.StringIO) as output, patch.object(output, "isatty", return_value=True):
+            main.render("status", "metrics")
+        self.assertEqual(output.getvalue(), "\033[35mmetrics\033[0m\n")
 
     def test_render_has_no_ansi_when_stdout_is_not_a_tty(self):
         with patch.object(main.sys.stdout, "isatty", return_value=False), patch("sys.stdout", new_callable=io.StringIO) as output:

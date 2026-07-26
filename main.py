@@ -9,6 +9,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 from openai import OpenAI
 
+MODEL = "openrouter/free"
+
 IMAGE_TYPES = {
     ".jpg": "image/jpeg",
     ".png": "image/png",
@@ -239,31 +241,51 @@ def render(kind: str, text: str) -> None:
             sys.stdout.write(f"\033[33m{text}\033[0m\n")
         else:
             sys.stdout.write(f"{text}\n")
+    elif kind == "status":
+        if is_tty:
+            sys.stdout.write(f"\033[35m{text}\033[0m\n")
+        else:
+            sys.stdout.write(f"{text}\n")
     elif kind == "answer":
-        sys.stdout.write(f"{text}\n")
+        if is_tty:
+            sys.stdout.write(f"\033[32m{text}\033[0m\n")
+        else:
+            sys.stdout.write(f"{text}\n")
     sys.stdout.flush()
 
 
-def run_agent(task: str, client: OpenAI) -> str:
+def run_agent(task: str, client: OpenAI) -> tuple[str, int, int | None]:
     response = client.responses.create(
-        model="openrouter/free",
+        model=MODEL,
         instructions=SYSTEM_PROMPT,
         input=task,
         tools=TOOLS,
     )
-    while calls := [item for item in response.output if item.type == "function_call"]:
+    total_tokens = 0
+    context_tokens = None
+    while True:
+        usage = getattr(response, "usage", None)
+        input_tokens = getattr(usage, "input_tokens", None)
+        output_tokens = getattr(usage, "output_tokens", None)
+        total_tokens += (input_tokens or 0) + (output_tokens or 0)
+        if input_tokens is not None:
+            context_tokens = input_tokens
+
+        calls = [item for item in response.output if item.type == "function_call"]
+        if not calls:
+            return response.output_text, total_tokens, context_tokens
+
         tool_outputs = [
             dispatch_tool(call.name, call.arguments, call.call_id) for call in calls
         ]
         for call in calls:
             render("tool", f"{call.name}({call.arguments})")
         response = client.responses.create(
-            model="openrouter/free",
+            model=MODEL,
             previous_response_id=response.id,
             input=tool_outputs,
             tools=TOOLS,
         )
-    return response.output_text
 
 
 def main() -> None:
@@ -274,11 +296,13 @@ def main() -> None:
         return
     client = OpenAI()
     try:
-        result = run_agent(task, client)
+        answer, total_tokens, context_tokens = run_agent(task, client)
     except Exception as e:
         render("output", f"Error: {e}")
         raise SystemExit(1)
-    render("answer", result)
+    context = context_tokens if context_tokens is not None else "?"
+    render("status", f"model: {MODEL} | tokens: {total_tokens} | context: {context}")
+    render("answer", answer)
 
 
 if __name__ == "__main__":
