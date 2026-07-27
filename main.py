@@ -319,19 +319,22 @@ def run_agent(task: str, client: OpenAI) -> tuple[str, int, int | None]:
 
 
 def main() -> None:
-    render("title", "k")
-    task = input("\u203a ").strip()
-    if not task:
-        return
     client = OpenAI()
-    try:
-        answer, total_tokens, context_tokens = run_agent(task, client)
-    except Exception as e:
-        render("output", f"Error: {e}")
-        raise SystemExit(1)
-    context = context_tokens if context_tokens is not None else "?"
-    render("status", f"model: {MODEL} | tokens: {total_tokens} | context: {context}")
-    render("answer", answer)
+    while True:
+        try:
+            task = input("\u203a ").strip()
+        except EOFError:
+            return
+        if not task:
+            return
+        try:
+            answer, total_tokens, context_tokens = run_agent(task, client)
+        except Exception as e:
+            render("output", f"Error: {e}")
+            render("status", status_line("?", None))
+            continue
+        render("answer", answer)
+        render("status", status_line(total_tokens, context_tokens))
 
 
 if __name__ == "__main__":

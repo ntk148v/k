@@ -98,6 +98,33 @@ class AgentTests(unittest.TestCase):
         self.assertNotIn("\x1b[", output.getvalue())
         self.assertIn("read file.txt", output.getvalue())
 
+    def test_main_processes_multiple_tasks_until_blank_input(self):
+        with (
+            patch("builtins.input", side_effect=["first", "second", ""]),
+            patch.object(main, "OpenAI"),
+            patch.object(main, "run_agent", side_effect=[("one", 1, 1), ("two", 2, 2)]) as mock_agent,
+            patch.object(main, "render") as render,
+        ):
+            main.main()
+        self.assertEqual(mock_agent.call_args_list[0].args[0], "first")
+        self.assertEqual(mock_agent.call_args_list[1].args[0], "second")
+        self.assertEqual(mock_agent.call_count, 2)
+        self.assertFalse(any(call.args[0] == "title" for call in render.call_args_list))
+
+    def test_main_renders_error_and_continues_after_agent_failure(self):
+        with (
+            patch("builtins.input", side_effect=["broken", "working", ""]),
+            patch.object(main, "OpenAI"),
+            patch.object(main, "run_agent", side_effect=[RuntimeError("provider down"), ("ok", 3, 2)]),
+            patch.object(main, "render") as render,
+        ):
+            main.main()
+        self.assertIn(
+            ("output", "Error: provider down"),
+            [call.args for call in render.call_args_list],
+        )
+        self.assertIn(("answer", "ok"), [call.args for call in render.call_args_list])
+
     def test_status_line_includes_k_directory_branch_and_metrics(self):
         with patch.object(main, "git_branch", return_value="main"):
             line = main.status_line(21, 9)
