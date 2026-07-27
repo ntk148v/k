@@ -340,6 +340,9 @@ def run_agent(task: str, client: OpenAI) -> tuple[str, int, int | None]:
 def main() -> None:
     client = OpenAI()
     try:
+        if sys.stdout.isatty():
+            sys.stdout.write("\033[2J\033[H")
+            sys.stdout.flush()
         render_pinned_status(status_line("?", None))
         while True:
             try:
