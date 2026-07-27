@@ -1,4 +1,5 @@
 import io
+import os
 import shutil
 import tempfile
 import unittest
@@ -67,7 +68,7 @@ class AgentTests(unittest.TestCase):
         client = SimpleNamespace(responses=SimpleNamespace(create=Mock(side_effect=[first, second])))
 
         with patch.object(main, "bash", return_value="hello"):
-            self.assertEqual(main.run_agent("say hello", client), ("Done", 21, 9))
+            self.assertEqual(main.run_agent("say hello", client)[:3], ("Done", 21, 9))
 
         first_call, second_call = client.responses.create.call_args_list
         self.assertEqual(first_call.kwargs["model"], main.MODEL)
@@ -81,7 +82,9 @@ class AgentTests(unittest.TestCase):
     def test_run_agent_tolerates_missing_usage(self):
         response = SimpleNamespace(id="resp-1", output=[], output_text="Done")
         client = SimpleNamespace(responses=SimpleNamespace(create=Mock(return_value=response)))
-        self.assertEqual(main.run_agent("say hello", client), ("Done", 0, None))
+        answer, total_tokens, context_tokens, history = main.run_agent("say hello", client)
+        self.assertEqual((answer, total_tokens, context_tokens), ("Done", 0, None))
+        self.assertTrue(history)
 
     def test_render_status_has_no_ansi_when_stdout_is_not_a_tty(self):
         with patch.object(main.sys.stdout, "isatty", return_value=False), patch("sys.stdout", new_callable=io.StringIO) as output:
@@ -148,7 +151,7 @@ class AgentTests(unittest.TestCase):
         with (
             patch("builtins.input", side_effect=["first", "second", ""]) as mock_input,
             patch.object(main, "OpenAI"),
-            patch.object(main, "run_agent", side_effect=[("one", 1, 1), ("two", 2, 2)]) as mock_agent,
+            patch.object(main, "run_agent", side_effect=[("one", 1, 1, []), ("two", 2, 2, [])]) as mock_agent,
             patch.object(main, "render_pinned_status", return_value=True),
             patch.object(main, "restore_terminal"),
             patch.object(main, "render") as render,
@@ -164,7 +167,7 @@ class AgentTests(unittest.TestCase):
         with (
             patch("builtins.input", side_effect=["broken", "working", ""]),
             patch.object(main, "OpenAI"),
-            patch.object(main, "run_agent", side_effect=[RuntimeError("provider down"), ("ok", 3, 2)]),
+            patch.object(main, "run_agent", side_effect=[RuntimeError("provider down"), ("ok", 3, 2, [])]),
             patch.object(main, "render_pinned_status", return_value=True),
             patch.object(main, "restore_terminal"),
             patch.object(main, "render") as render,
@@ -223,6 +226,21 @@ class AgentTests(unittest.TestCase):
         ):
             main.main()
         self.assertEqual(restore.call_count, 1)
+
+    def test_session_round_trip_uses_home_k_sessions(self):
+        with tempfile.TemporaryDirectory() as d:
+            old_home = os.environ.get("HOME")
+            os.environ["HOME"] = d
+            try:
+                session = {"id": "abc123", "history": [{"role": "user", "content": "hi"}], "transcript": []}
+                main.save_session(session)
+                self.assertTrue((Path(d) / ".k" / "sessions" / "abc123.json").exists())
+                self.assertEqual(main.load_session("abc123"), session)
+            finally:
+                if old_home is None:
+                    os.environ.pop("HOME", None)
+                else:
+                    os.environ["HOME"] = old_home
 
     def test_handle_command_recognizes_quit(self):
         self.assertEqual(main.handle_command("/quit"), "quit")

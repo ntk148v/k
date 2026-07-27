@@ -1,10 +1,13 @@
 import base64
+import argparse
 import json
 import os
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -175,6 +178,36 @@ TOOL_HANDLERS = {
     "bash": bash,
 }
 
+
+def k_dir() -> Path:
+    return Path.home() / ".k"
+
+
+def sessions_dir() -> Path:
+    return k_dir() / "sessions"
+
+
+def new_session_id() -> str:
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    return f"{stamp}-{uuid4().hex[:6]}"
+
+
+def session_path(session_id: str) -> Path:
+    if "/" in session_id or "\\" in session_id or session_id in {"", ".", ".."}:
+        raise ValueError("invalid session id")
+    return sessions_dir() / f"{session_id}.json"
+
+
+def load_session(session_id: str) -> dict:
+    return json.loads(session_path(session_id).read_text(encoding="utf-8"))
+
+
+def save_session(session: dict) -> None:
+    path = session_path(session["id"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(session, indent=2), encoding="utf-8")
+
+
 SYSTEM_PROMPT = """You are an expert coding assistant. You help users with coding tasks by reading files, executing commands, editing code, and writing new files.
 
 Available tools:
@@ -310,8 +343,9 @@ def handle_command(text: str) -> str | None:
     return f"Unknown command: {text.split()[0]}"
 
 
-def run_agent(task: str, client: OpenAI) -> tuple[str, int, int | None]:
-    history: list[object] = [{"role": "user", "content": task}]
+def run_agent(task: str, client: OpenAI, history: list[object] | None = None) -> tuple[str, int, int | None, list[object]]:
+    history = list(history or [])
+    history.append({"role": "user", "content": task})
     response = client.responses.create(
         model=MODEL,
         instructions=SYSTEM_PROMPT,
@@ -330,7 +364,8 @@ def run_agent(task: str, client: OpenAI) -> tuple[str, int, int | None]:
 
         calls = [item for item in response.output if item.type == "function_call"]
         if not calls:
-            return response.output_text, total_tokens, context_tokens
+            history.extend(response.output)
+            return response.output_text, total_tokens, context_tokens, history
 
         tool_outputs = [
             dispatch_tool(call.name, call.arguments, call.call_id) for call in calls
@@ -348,6 +383,10 @@ def run_agent(task: str, client: OpenAI) -> tuple[str, int, int | None]:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(prog="k")
+    parser.add_argument("--resume", metavar="ID")
+    args, _ = parser.parse_known_args()
+    session = load_session(args.resume) if args.resume else {"id": new_session_id(), "history": [], "transcript": []}
     client = OpenAI()
     try:
         if sys.stdout.isatty():
@@ -368,7 +407,10 @@ def main() -> None:
                 render("output", command)
                 continue
             try:
-                answer, total_tokens, context_tokens = run_agent(task, client)
+                answer, total_tokens, context_tokens, history = run_agent(task, client, session["history"])
+                session["history"] = history
+                session["transcript"].append({"prompt": task, "answer": answer})
+                save_session(session)
             except Exception as e:
                 render("output", f"Error: {e}")
                 render_pinned_status(status_line("?", None))
