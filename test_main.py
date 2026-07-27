@@ -105,10 +105,23 @@ class AgentTests(unittest.TestCase):
             patch.object(output, "isatty", return_value=True),
             patch.object(main.shutil, "get_terminal_size", return_value=size),
         ):
-            self.assertTrue(main.render_pinned_status("k | /repo"))
+            self.assertTrue(main.render_pinned_status("k | /repo", move_cursor=True))
         self.assertEqual(
             output.getvalue(),
             "\033[2;24r\033[1;1H\033[2K\033[31mk\033[90m | /repo\033[0m\n\033[2;1H",
+        )
+
+    def test_render_pinned_status_can_repaint_without_moving_input_cursor(self):
+        size = SimpleNamespace(lines=24)
+        with (
+            patch("sys.stdout", new_callable=io.StringIO) as output,
+            patch.object(output, "isatty", return_value=True),
+            patch.object(main.shutil, "get_terminal_size", return_value=size),
+        ):
+            self.assertTrue(main.render_pinned_status("k | /repo"))
+        self.assertEqual(
+            output.getvalue(),
+            "\033[s\033[2;24r\033[1;1H\033[2K\033[31mk\033[90m | /repo\033[0m\n\033[u",
         )
 
     def test_render_pinned_status_falls_back_when_stdout_is_not_a_tty(self):
@@ -188,6 +201,7 @@ class AgentTests(unittest.TestCase):
         ):
             main.main()
         self.assertEqual(status.call_args.args[0], main.status_line("?", None))
+        self.assertTrue(status.call_args.kwargs["move_cursor"])
         self.assertEqual(restore.call_count, 1)
 
     def test_main_exits_cleanly_on_eof(self):

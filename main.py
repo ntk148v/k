@@ -279,7 +279,7 @@ def render(kind: str, text: str) -> None:
     sys.stdout.flush()
 
 
-def render_pinned_status(text: str) -> bool:
+def render_pinned_status(text: str, *, move_cursor: bool = False) -> bool:
     if not sys.stdout.isatty():
         render("status", text)
         return False
@@ -287,9 +287,11 @@ def render_pinned_status(text: str) -> bool:
     if rows < 3:
         render("status", text)
         return False
+    if not move_cursor:
+        sys.stdout.write("\033[s")
     sys.stdout.write(f"\033[2;{rows}r\033[1;1H\033[2K")
     render("status", text)
-    sys.stdout.write("\033[2;1H")
+    sys.stdout.write("\033[2;1H" if move_cursor else "\033[u")
     sys.stdout.flush()
     return True
 
@@ -343,7 +345,7 @@ def main() -> None:
         if sys.stdout.isatty():
             sys.stdout.write("\033[2J\033[H")
             sys.stdout.flush()
-        render_pinned_status(status_line("?", None))
+        render_pinned_status(status_line("?", None), move_cursor=True)
         while True:
             try:
                 task = input("\u276f ").strip()
