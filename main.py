@@ -181,8 +181,6 @@ TOOL_HANDLERS = {
 
 MAX_TOOL_OUTPUT_CHARS = 12_000
 
-BANNER = "k\n\U0001f60e"
-
 RESET = "\033[0m"
 PALETTES = {
     "light": {
@@ -241,11 +239,6 @@ def format_markdown(text: str) -> str:
         else:
             result.append(f"{color('text')}{_inline(line)}{RESET}")
     return "\n".join(result)
-
-
-def render_banner() -> None:
-    render("status", BANNER)
-
 
 def k_dir() -> Path:
     return Path.home() / ".k"
@@ -382,7 +375,7 @@ def render(kind: str, text: str) -> None:
             sys.stdout.write(f"{text}\n")
     elif kind == "status":
         if is_tty:
-            lines = [f"{color('accent')}k{color('muted')}{line[1:]}{RESET}" if line.startswith("k") else f"{color('muted')}{line}{RESET}" for line in text.splitlines()]
+            lines = [f"\033[7m{color('accent')} k {RESET}{color('muted')}{line[1:]}{RESET}" if line.startswith("k") else f"{color('muted')}{line}{RESET}" for line in text.splitlines()]
             sys.stdout.write("\n".join(lines) + "\n")
         else:
             sys.stdout.write(f"{text}\n")
@@ -476,7 +469,6 @@ def main() -> None:
         if sys.stdout.isatty():
             sys.stdout.write("\033[2J\033[H")
             sys.stdout.flush()
-        render_banner()
         render_pinned_status(status_line("?", None), move_cursor=True)
         while True:
             try:
