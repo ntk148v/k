@@ -9,6 +9,11 @@ from unittest.mock import Mock, patch
 import main
 
 
+class ReadlineTests(unittest.TestCase):
+    def test_readline_is_loaded_for_interactive_history(self):
+        self.assertIsNotNone(getattr(main, "readline", None))
+
+
 class ToolTests(unittest.TestCase):
     def test_read_respects_offset_and_limit(self):
         with tempfile.TemporaryDirectory() as directory:

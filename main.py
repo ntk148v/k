@@ -2,6 +2,7 @@ import base64
 import argparse
 import json
 import re
+import readline
 import os
 import shutil
 import subprocess
