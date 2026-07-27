@@ -354,3 +354,23 @@ class AgentTests(unittest.TestCase):
         with patch.object(main, "skill_instructions", return_value=("base\n## Active skills\n### coding", [])):
             main.run_agent("hello", client, skills=["coding"])
         self.assertEqual(client.responses.create.call_args.kwargs["instructions"], "base\n## Active skills\n### coding")
+
+    def test_handle_skill_command_lists_loads_and_clears(self):
+        session = {"skills": []}
+        with patch.object(main, "available_skills", return_value={"coding": Path("coding.md")}):
+            self.assertEqual(main.handle_skill_command("/skills", session), "Available skills: coding")
+            self.assertEqual(main.handle_skill_command("/skill coding", session), "Loaded skill: coding")
+            self.assertEqual(main.handle_skill_command("/skill coding", session), "Skill already loaded: coding")
+            self.assertEqual(main.handle_skill_command("/skill clear", session), "Cleared skills")
+        self.assertEqual(session["skills"], [])
+
+    def test_handle_skill_command_rejects_bad_names(self):
+        session = {"skills": []}
+        self.assertEqual(main.handle_skill_command("/skill ../secret", session), "Invalid skill name")
+        self.assertEqual(main.handle_skill_command("/skill missing", session), "Unknown skill: missing")
+
+    def test_session_round_trip_keeps_skills(self):
+        with tempfile.TemporaryDirectory() as d, patch.object(main.Path, "home", return_value=Path(d)):
+            session = {"id": "abc123", "history": [], "transcript": [], "skills": ["coding"]}
+            main.save_session(session)
+            self.assertEqual(main.load_session("abc123")["skills"], ["coding"])

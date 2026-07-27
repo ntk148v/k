@@ -428,6 +428,27 @@ def restore_terminal() -> None:
         sys.stdout.flush()
 
 
+def handle_skill_command(text: str, session: dict) -> str | None:
+    if text == "/skills":
+        names = ", ".join(available_skills()) or "(none)"
+        return f"Available skills: {names}"
+    if not text.startswith("/skill "):
+        return None
+    name = text.removeprefix("/skill ").strip()
+    if name == "clear":
+        session["skills"] = []
+        return "Cleared skills"
+    if not name or "/" in name or "\\" in name:
+        return "Invalid skill name"
+    if name not in available_skills():
+        return f"Unknown skill: {name}"
+    active = session.setdefault("skills", [])
+    if name in active:
+        return f"Skill already loaded: {name}"
+    active.append(name)
+    return f"Loaded skill: {name}"
+
+
 def handle_command(text: str) -> str | None:
     if not text.startswith("/"):
         return None
@@ -437,7 +458,9 @@ def handle_command(text: str) -> str | None:
 
 
 def run_agent(task: str, client: OpenAI, history: list[object] | None = None, session_id: str | None = None, skills: list[str] | None = None) -> tuple[str, int, int | None, list[object]]:
-    instructions, _missing = skill_instructions(skills or [])
+    instructions, missing = skill_instructions(skills or [])
+    for name in missing:
+        render("output", f"Warning: skill '{name}' not found, skipping")
     history = list(history or [])
     history.append({"role": "user", "content": task})
     response = client.responses.create(
@@ -482,7 +505,7 @@ def main() -> None:
     parser.add_argument("--theme", choices=PALETTES, default=os.getenv("K_THEME", "light"))
     args, _ = parser.parse_known_args()
     set_theme(args.theme)
-    session = load_session(args.resume) if args.resume else {"id": new_session_id(), "history": [], "transcript": []}
+    session = load_session(args.resume) if args.resume else {"id": new_session_id(), "history": [], "transcript": [], "skills": []}
     client = OpenAI()
     try:
         if sys.stdout.isatty():
@@ -496,6 +519,12 @@ def main() -> None:
                 return
             if not task:
                 return
+            skill_result = handle_skill_command(task, session)
+            if skill_result:
+                render("output", skill_result)
+                save_session(session)
+                render_pinned_status(status_line("?", None))
+                continue
             command = handle_command(task)
             if command == "quit":
                 return
@@ -503,7 +532,7 @@ def main() -> None:
                 render("output", command)
                 continue
             try:
-                answer, total_tokens, context_tokens, history = run_agent(task, client, session["history"], session["id"])
+                answer, total_tokens, context_tokens, history = run_agent(task, client, session["history"], session["id"], session.get("skills", []))
                 session["transcript"].append({"prompt": task, "answer": answer})
                 save_session(session)
             except Exception as e:
