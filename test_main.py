@@ -331,15 +331,18 @@ class AgentTests(unittest.TestCase):
 
     def test_available_skills_lists_user_skills(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(main, "USER_SKILLS_DIR", Path(directory)):
-            (Path(directory) / "coding.md").write_text("Use pytest.", encoding="utf-8")
-            (Path(directory) / "review.md").write_text("Review code.", encoding="utf-8")
+            (Path(directory) / "coding" / "SKILL.md").parent.mkdir(exist_ok=True)
+            (Path(directory) / "coding" / "SKILL.md").write_text("Use pytest.", encoding="utf-8")
+            (Path(directory) / "review" / "SKILL.md").parent.mkdir(exist_ok=True)
+            (Path(directory) / "review" / "SKILL.md").write_text("Review code.", encoding="utf-8")
             skills = main.available_skills()
-            self.assertEqual(list(skills), ["coding", "review"])
+            self.assertEqual(sorted(skills), ["coding", "review"])
             self.assertEqual(skills["coding"].read_text(encoding="utf-8"), "Use pytest.")
 
     def test_skill_instructions_appends_active_skill_and_reports_missing(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(main, "USER_SKILLS_DIR", Path(directory)):
-            Path(directory, "coding.md").write_text("Use pytest.", encoding="utf-8")
+            (Path(directory) / "coding" / "SKILL.md").parent.mkdir(exist_ok=True)
+            (Path(directory) / "coding" / "SKILL.md").write_text("Use pytest.", encoding="utf-8")
             instructions, missing = main.skill_instructions(["coding", "gone"])
             self.assertIn("## Active skills", instructions)
             self.assertIn("### coding\nUse pytest.", instructions)
@@ -354,7 +357,7 @@ class AgentTests(unittest.TestCase):
 
     def test_handle_skill_command_lists_loads_and_clears(self):
         session = {"skills": []}
-        with patch.object(main, "available_skills", return_value={"coding": Path("coding.md")}):
+        with patch.object(main, "available_skills", return_value={"coding": Path("skills/coding/SKILL.md")}):
             self.assertEqual(main.handle_skill_command("/skills", session), "Available skills: coding")
             self.assertEqual(main.handle_skill_command("/skill coding", session), "Loaded skill: coding")
             self.assertEqual(main.handle_skill_command("/skill coding", session), "Skill already loaded: coding")

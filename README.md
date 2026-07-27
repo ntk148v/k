@@ -35,11 +35,11 @@ Output uses Pi-inspired truecolor light and dark palettes: colored Markdown, blu
 ## Commands
 
 - `/quit` exits without calling the model.
-- `/skills` lists `~/.agents/skills/*.md`.
+- `/skills` lists `~/.agent/skills/**/SKILL.md`.
 - `/skill <name>` activates an exact named skill for the current saved session.
 - `/skill clear` removes the session's active skills.
 
-Skills are direct Markdown files in `~/.agents/skills/`. They are never selected automatically.
+Skills are Markdown files discovered under `~/.agent/skills/<name>/SKILL.md`. They are never selected automatically.
 
 ## Context-mode
 

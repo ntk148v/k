@@ -181,11 +181,11 @@ TOOL_HANDLERS = {
 
 MAX_TOOL_OUTPUT_CHARS = 12_000
 
-USER_SKILLS_DIR = Path.home() / ".agents" / "skills"
+USER_SKILLS_DIR = Path.home() / ".agent" / "skills"
 
 
 def available_skills() -> dict[str, Path]:
-    return {path.stem: path for path in sorted(USER_SKILLS_DIR.glob("*.md"))}
+    return {path.parent.name: path for path in USER_SKILLS_DIR.rglob("SKILL.md")}
 
 
 def skill_instructions(names: list[str]) -> tuple[str, list[str]]:
