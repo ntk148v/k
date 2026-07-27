@@ -339,21 +339,27 @@ def run_agent(task: str, client: OpenAI) -> tuple[str, int, int | None]:
 
 def main() -> None:
     client = OpenAI()
-    while True:
-        try:
-            task = input("\u203a ").strip()
-        except EOFError:
-            return
-        if not task:
-            return
-        try:
-            answer, total_tokens, context_tokens = run_agent(task, client)
-        except Exception as e:
-            render("output", f"Error: {e}")
-            render("status", status_line("?", None))
-            continue
-        render("answer", answer)
-        render("status", status_line(total_tokens, context_tokens))
+    try:
+        render_pinned_status(status_line("?", None))
+        while True:
+            try:
+                task = input("\u276f ").strip()
+            except EOFError:
+                return
+            if not task:
+                return
+            try:
+                answer, total_tokens, context_tokens = run_agent(task, client)
+            except Exception as e:
+                render("output", f"Error: {e}")
+                render_pinned_status(status_line("?", None))
+                continue
+            render("answer", answer)
+            render_pinned_status(status_line(total_tokens, context_tokens))
+    except KeyboardInterrupt:
+        return
+    finally:
+        restore_terminal()
 
 
 if __name__ == "__main__":

@@ -133,15 +133,18 @@ class AgentTests(unittest.TestCase):
 
     def test_main_processes_multiple_tasks_until_blank_input(self):
         with (
-            patch("builtins.input", side_effect=["first", "second", ""]),
+            patch("builtins.input", side_effect=["first", "second", ""]) as mock_input,
             patch.object(main, "OpenAI"),
             patch.object(main, "run_agent", side_effect=[("one", 1, 1), ("two", 2, 2)]) as mock_agent,
+            patch.object(main, "render_pinned_status", return_value=True),
+            patch.object(main, "restore_terminal"),
             patch.object(main, "render") as render,
         ):
             main.main()
         self.assertEqual(mock_agent.call_args_list[0].args[0], "first")
         self.assertEqual(mock_agent.call_args_list[1].args[0], "second")
         self.assertEqual(mock_agent.call_count, 2)
+        self.assertEqual(mock_input.call_args_list[0].args, ("\u276f ",))
         self.assertFalse(any(call.args[0] == "title" for call in render.call_args_list))
 
     def test_main_renders_error_and_continues_after_agent_failure(self):
@@ -149,6 +152,8 @@ class AgentTests(unittest.TestCase):
             patch("builtins.input", side_effect=["broken", "working", ""]),
             patch.object(main, "OpenAI"),
             patch.object(main, "run_agent", side_effect=[RuntimeError("provider down"), ("ok", 3, 2)]),
+            patch.object(main, "render_pinned_status", return_value=True),
+            patch.object(main, "restore_terminal"),
             patch.object(main, "render") as render,
         ):
             main.main()
@@ -173,3 +178,34 @@ class AgentTests(unittest.TestCase):
             line = main.status_line(0, None)
         self.assertNotIn("branch:", line)
         self.assertIn("context: ?", line)
+
+    def test_main_uses_pinned_status_and_the_new_prompt(self):
+        with (
+            patch("builtins.input", side_effect=[""]),
+            patch.object(main, "OpenAI"),
+            patch.object(main, "render_pinned_status", return_value=True) as status,
+            patch.object(main, "restore_terminal") as restore,
+        ):
+            main.main()
+        self.assertEqual(status.call_args.args[0], main.status_line("?", None))
+        self.assertEqual(restore.call_count, 1)
+
+    def test_main_exits_cleanly_on_eof(self):
+        with (
+            patch("builtins.input", side_effect=EOFError),
+            patch.object(main, "OpenAI"),
+            patch.object(main, "render_pinned_status", return_value=True),
+            patch.object(main, "restore_terminal") as restore,
+        ):
+            main.main()
+        self.assertEqual(restore.call_count, 1)
+
+    def test_main_exits_cleanly_on_keyboard_interrupt(self):
+        with (
+            patch("builtins.input", side_effect=KeyboardInterrupt),
+            patch.object(main, "OpenAI"),
+            patch.object(main, "render_pinned_status", return_value=True),
+            patch.object(main, "restore_terminal") as restore,
+        ):
+            main.main()
+        self.assertEqual(restore.call_count, 1)
