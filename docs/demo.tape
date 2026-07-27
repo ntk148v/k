@@ -28,7 +28,7 @@ Hide
 # ── Launch k ──────────────────────────────────────────────
 Show
 Sleep 500ms
-Type "uv run python main.py"
+Type "uv run python main.py --theme dark"
 Sleep 300ms
 Enter
 Sleep 3s
