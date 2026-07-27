@@ -359,6 +359,19 @@ class AgentTests(unittest.TestCase):
             main.run_agent("hello", client, skills=["coding"])
         self.assertEqual(client.responses.create.call_args.kwargs["instructions"], "base\n## Active skills\n### coding")
 
+    def test_run_agent_rejects_response_without_output_list(self):
+        response = SimpleNamespace(output=None, output_text="", usage=None)
+        client = SimpleNamespace(responses=SimpleNamespace(create=Mock(return_value=response)))
+        with self.assertRaisesRegex(RuntimeError, "provider response is malformed"):
+            main.run_agent("hello", client)
+
+    def test_run_agent_rejects_malformed_tool_call(self):
+        call = SimpleNamespace(type="function_call", name="bash")
+        response = SimpleNamespace(output=[call], output_text="", usage=None)
+        client = SimpleNamespace(responses=SimpleNamespace(create=Mock(return_value=response)))
+        with self.assertRaisesRegex(RuntimeError, "provider response is malformed"):
+            main.run_agent("hello", client)
+
     def test_handle_skill_command_lists_loads_and_clears(self):
         session = {"skills": []}
         with patch.object(main, "available_skills", return_value={"coding": Path("skills/coding/SKILL.md")}):

@@ -490,6 +490,9 @@ def run_agent(task: str, client: OpenAI, history: list[object] | None = None, se
     total_tokens = 0
     context_tokens = None
     while True:
+        output = getattr(response, "output", None)
+        if not isinstance(output, list):
+            raise RuntimeError("provider response is malformed")
         usage = getattr(response, "usage", None)
         input_tokens = getattr(usage, "input_tokens", None)
         output_tokens = getattr(usage, "output_tokens", None)
@@ -497,9 +500,11 @@ def run_agent(task: str, client: OpenAI, history: list[object] | None = None, se
         if input_tokens is not None:
             context_tokens = input_tokens
 
-        calls = [item for item in response.output if item.type == "function_call"]
+        calls = [item for item in output if item.type == "function_call"]
+        if any(not all(isinstance(getattr(call, field, None), str) for field in ("name", "arguments", "call_id")) for call in calls):
+            raise RuntimeError("provider response is malformed")
         if not calls:
-            history.extend(response.output)
+            history.extend(output)
             return response.output_text, total_tokens, context_tokens, history
 
         tool_outputs = [
@@ -507,7 +512,7 @@ def run_agent(task: str, client: OpenAI, history: list[object] | None = None, se
         ]
         for call in calls:
             render("tool", f"{call.name}({call.arguments})")
-        history.extend(response.output)
+        history.extend(output)
         history.extend(tool_outputs)
         response = client.responses.create(
             model=MODEL,
