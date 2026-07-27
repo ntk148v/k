@@ -374,6 +374,15 @@ class AgentTests(unittest.TestCase):
                 main.main()
             self.assertEqual(main.load_session("resume-id")["id"], "resume-id")
 
+    def test_save_session_serializes_response_objects(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(main.Path, "home", return_value=Path(directory)):
+            response = SimpleNamespace(to_dict=lambda: {"type": "message", "content": []})
+            main.save_session({"id": "abc123", "history": [response], "transcript": [], "skills": []})
+            self.assertEqual(
+                main.load_session("abc123")["history"],
+                [{"type": "message", "content": []}],
+            )
+
     def test_session_round_trip_uses_home_k_sessions(self):
         with tempfile.TemporaryDirectory() as d:
             old_home = os.environ.get("HOME")

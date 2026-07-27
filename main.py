@@ -303,7 +303,7 @@ def load_session(session_id: str) -> dict:
 def save_session(session: dict) -> None:
     path = session_path(session["id"])
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(session, indent=2), encoding="utf-8")
+    path.write_text(json.dumps(session, indent=2, default=lambda value: value.to_dict()), encoding="utf-8")
 
 
 def compact_output(text: str, label: str, session_id: str | None = None) -> str:
