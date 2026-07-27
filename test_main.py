@@ -316,6 +316,37 @@ class AgentTests(unittest.TestCase):
             main.main()
         self.assertEqual(restore.call_count, 1)
 
+    def test_main_shows_resume_command_on_eof(self):
+        with (
+            patch("builtins.input", side_effect=EOFError),
+            patch.object(main, "OpenAI"),
+            patch.object(main, "new_session_id", return_value="resume-id"),
+            patch.object(main, "render_pinned_status", return_value=True),
+            patch.object(main, "restore_terminal"),
+            patch.object(main, "render") as render,
+        ):
+            main.main()
+        self.assertIn(
+            ("output", "To resume this session: k --resume resume-id"),
+            [call.args for call in render.call_args_list],
+        )
+
+    def test_main_shows_resume_command_on_unexpected_error(self):
+        with (
+            patch("builtins.input", side_effect=RuntimeError("boom")),
+            patch.object(main, "OpenAI"),
+            patch.object(main, "new_session_id", return_value="resume-id"),
+            patch.object(main, "render_pinned_status", return_value=True),
+            patch.object(main, "restore_terminal"),
+            patch.object(main, "render") as render,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "boom"):
+                main.main()
+        self.assertIn(
+            ("output", "To resume this session: k --resume resume-id"),
+            [call.args for call in render.call_args_list],
+        )
+
     def test_session_round_trip_uses_home_k_sessions(self):
         with tempfile.TemporaryDirectory() as d:
             old_home = os.environ.get("HOME")
