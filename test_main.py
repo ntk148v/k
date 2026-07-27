@@ -112,15 +112,12 @@ class AgentTests(unittest.TestCase):
             main.render("status", "model: openrouter/free | tokens: 21 | context: 9")
         self.assertEqual(output.getvalue(), "model: openrouter/free | tokens: 21 | context: 9\n")
 
-    def test_render_status_colors_k_red_and_remainder_grey_in_a_tty(self):
+    def test_render_status_uses_inverse_video_in_a_tty(self):
         with patch("sys.stdout", new_callable=io.StringIO) as output, patch.object(
             output, "isatty", return_value=True
         ):
             main.render("status", "k | /repo | main")
-        self.assertEqual(
-            output.getvalue(),
-            "\033[93mk\033[37m | /repo | main\033[0m\n",
-        )
+        self.assertEqual(output.getvalue(), "\033[7mk | /repo | main\033[0m\n")
 
     def test_render_pinned_status_reserves_first_row_and_repositions_cursor(self):
         size = SimpleNamespace(lines=24)
@@ -132,7 +129,7 @@ class AgentTests(unittest.TestCase):
             self.assertTrue(main.render_pinned_status("k | /repo", move_cursor=True))
         self.assertEqual(
             output.getvalue(),
-            "\033[2;24r\033[1;1H\033[2K\033[93mk\033[37m | /repo\033[0m\n\033[2;1H",
+            "\033[2;24r\033[1;1H\033[2K\033[7mk | /repo\033[0m\n\033[2;1H",
         )
 
     def test_render_pinned_status_can_repaint_without_moving_input_cursor(self):
@@ -145,7 +142,7 @@ class AgentTests(unittest.TestCase):
             self.assertTrue(main.render_pinned_status("k | /repo"))
         self.assertEqual(
             output.getvalue(),
-            "\033[s\033[2;24r\033[1;1H\033[2K\033[93mk\033[37m | /repo\033[0m\n\033[u",
+            "\033[s\033[2;24r\033[1;1H\033[2K\033[7mk | /repo\033[0m\n\033[u",
         )
 
     def test_render_pinned_status_falls_back_when_stdout_is_not_a_tty(self):
@@ -169,30 +166,30 @@ class AgentTests(unittest.TestCase):
         self.assertIn("read file.txt", output.getvalue())
 
     def test_format_markdown_heading(self):
-        self.assertEqual(main.format_markdown("# Title"), "\033[93m\033[1mTitle\033[93m\033[0m")
+        self.assertEqual(main.format_markdown("# Title"), "\033[1mTitle\033[0m")
 
     def test_format_markdown_list_with_inline(self):
         self.assertEqual(
             main.format_markdown("- **bold** and `code`"),
-            "\033[93m• \033[1mbold\033[93m and \033[37mcode\033[93m\033[0m",
+            "• \033[1mbold\033[0m and \033[7mcode\033[0m\033[0m",
         )
 
     def test_format_markdown_fenced_code(self):
         self.assertEqual(
             main.format_markdown("```\n*x*\n```"),
-            "\033[93m\033[37m```\033[0m\n\033[93m\033[37m*x*\033[0m\n\033[93m\033[37m```\033[0m",
+            "\033[7m```\033[0m\n\033[7m*x*\033[0m\n\033[7m```\033[0m",
         )
 
     def test_format_markdown_blockquote(self):
-        self.assertEqual(main.format_markdown("> note"), "\033[93m\033[37m│ note\033[0m")
+        self.assertEqual(main.format_markdown("> note"), "│ note\033[0m")
 
     def test_format_markdown_hr(self):
-        self.assertEqual(main.format_markdown("---"), "\033[93m\033[37m───\033[0m")
+        self.assertEqual(main.format_markdown("---"), "───\033[0m")
 
     def test_format_markdown_bold_italic(self):
         self.assertEqual(
             main.format_markdown("**bold** and *italic*"),
-            "\033[93m\033[1mbold\033[93m and \033[3mitalic\033[93m\033[0m",
+            "\033[1mbold\033[0m and \033[3mitalic\033[0m\033[0m",
         )
 
     def test_render_tool_uses_bright_blue(self):
@@ -209,12 +206,12 @@ class AgentTests(unittest.TestCase):
             main.render("output", "Error: something went wrong")
         self.assertEqual(output.getvalue(), "\033[91mError: something went wrong\033[0m\n")
 
-    def test_render_answer_uses_markdown_in_tty(self):
+    def test_render_answer_uses_default_terminal_foreground(self):
         with patch("sys.stdout", new_callable=io.StringIO) as output, patch.object(
             output, "isatty", return_value=True
         ):
-            main.render("answer", "# Title")
-        self.assertEqual(output.getvalue(), "\033[93m\033[1mTitle\033[93m\033[0m\n")
+            main.render("answer", "plain text")
+        self.assertEqual(output.getvalue(), "plain text\033[0m\n")
 
     def test_render_answer_plain_when_not_a_tty(self):
         with patch("sys.stdout", new_callable=io.StringIO) as output, patch.object(

@@ -184,17 +184,16 @@ MAX_TOOL_OUTPUT_CHARS = 12_000
 BANNER = "k\n\U0001f60e"
 
 RESET = "\033[0m"
-ANSWER = "\033[93m"
+ANSWER = ""
 TOOL = "\033[94m"
 ERROR = "\033[91m"
-STATUS = "\033[37m"
-CODE = "\033[37m"
+CODE = "\033[7m"
 
 
 def _inline(line: str) -> str:
-    line = re.sub(r"`([^`]+)`", lambda m: f"{CODE}{m.group(1)}{ANSWER}", line)
-    line = re.sub(r"\*\*([^*]+)\*\*", lambda m: f"\033[1m{m.group(1)}{ANSWER}", line)
-    line = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)", lambda m: f"\033[3m{m.group(1)}{ANSWER}", line)
+    line = re.sub(r"`([^`]+)`", lambda m: f"{CODE}{m.group(1)}{RESET}", line)
+    line = re.sub(r"\*\*([^*]+)\*\*", lambda m: f"\033[1m{m.group(1)}{RESET}", line)
+    line = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)", lambda m: f"\033[3m{m.group(1)}{RESET}", line)
     return line
 
 
@@ -221,10 +220,10 @@ def format_markdown(text: str) -> str:
             result.append(f"{ANSWER}{m.group(1)}. {_inline(m.group(2))}{RESET}")
             continue
         if m := re.match(r"^>\s?(.*)$", line):
-            result.append(f"{ANSWER}\033[37m│ {_inline(m.group(1))}{RESET}")
+            result.append(f"{ANSWER}│ {_inline(m.group(1))}{RESET}")
             continue
         if m := re.match(r"^\s{0,3}([-*_])(?:\s*\1){2,}\s*$", line):
-            result.append(f"{ANSWER}\033[37m{'─' * 3}{RESET}")
+            result.append(f"{ANSWER}{'─' * 3}{RESET}")
             continue
 
         result.append(f"{ANSWER}{_inline(line)}{RESET}")
@@ -369,10 +368,8 @@ def render(kind: str, text: str) -> None:
         else:
             sys.stdout.write(f"{text}\n")
     elif kind == "status":
-        if is_tty and text.startswith("k"):
-            sys.stdout.write(f"{ANSWER}k{STATUS}{text[1:]}{RESET}\n")
-        elif is_tty:
-            sys.stdout.write(f"{STATUS}{text}{RESET}\n")
+        if is_tty:
+            sys.stdout.write("\n".join(f"\033[7m{line}{RESET}" for line in text.splitlines()) + "\n")
         else:
             sys.stdout.write(f"{text}\n")
     elif kind == "answer":

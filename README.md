@@ -30,7 +30,7 @@ k | /path/to/project | main | model: openrouter/free | tokens: 1234 | context: 5
 
 Tool calls use self-contained request history, which works with OpenAI-compatible providers that do not support `previous_response_id` lookups.
 
-Output is color-coded in a terminal: bright yellow final answers and `k` status marker, bright blue tool calls, bright red errors, and light grey status text. Common Markdown in final answers is styled without changing non-interactive output.
+Output uses the terminal default foreground for final answers, bright blue for tool calls, bright red for errors, and inverse video for the status line. Common Markdown in final answers is styled without changing non-interactive output.
 
 ## Commands
 
