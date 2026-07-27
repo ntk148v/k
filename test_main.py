@@ -223,3 +223,10 @@ class AgentTests(unittest.TestCase):
         ):
             main.main()
         self.assertEqual(restore.call_count, 1)
+
+    def test_handle_command_recognizes_quit(self):
+        self.assertEqual(main.handle_command("/quit"), "quit")
+
+    def test_handle_command_rejects_unknown_commands(self):
+        self.assertEqual(main.handle_command("/wat"), "Unknown command: /wat")
+        self.assertIsNone(main.handle_command("write a file"))

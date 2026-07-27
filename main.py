@@ -302,6 +302,14 @@ def restore_terminal() -> None:
         sys.stdout.flush()
 
 
+def handle_command(text: str) -> str | None:
+    if not text.startswith("/"):
+        return None
+    if text == "/quit":
+        return "quit"
+    return f"Unknown command: {text.split()[0]}"
+
+
 def run_agent(task: str, client: OpenAI) -> tuple[str, int, int | None]:
     history: list[object] = [{"role": "user", "content": task}]
     response = client.responses.create(
@@ -353,6 +361,12 @@ def main() -> None:
                 return
             if not task:
                 return
+            command = handle_command(task)
+            if command == "quit":
+                return
+            if command:
+                render("output", command)
+                continue
             try:
                 answer, total_tokens, context_tokens = run_agent(task, client)
             except Exception as e:
