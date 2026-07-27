@@ -328,3 +328,29 @@ class AgentTests(unittest.TestCase):
     def test_handle_command_rejects_unknown_commands(self):
         self.assertEqual(main.handle_command("/wat"), "Unknown command: /wat")
         self.assertIsNone(main.handle_command("write a file"))
+
+    def test_available_skills_lists_builtins_and_user_override(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(main, "BUILTIN_SKILLS_DIR", Path(directory, "builtins")), patch.object(main, "USER_SKILLS_DIR", Path(directory, "user")):
+            main.BUILTIN_SKILLS_DIR.mkdir()
+            main.USER_SKILLS_DIR.mkdir()
+            (main.BUILTIN_SKILLS_DIR / "coding.md").write_text("built-in", encoding="utf-8")
+            (main.USER_SKILLS_DIR / "coding.md").write_text("user", encoding="utf-8")
+            (main.USER_SKILLS_DIR / "review.md").write_text("review", encoding="utf-8")
+            skills = main.available_skills()
+            self.assertEqual(list(skills), ["coding", "review"])
+            self.assertEqual(skills["coding"].read_text(encoding="utf-8"), "user")
+
+    def test_skill_instructions_appends_active_skill_and_reports_missing(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(main, "BUILTIN_SKILLS_DIR", Path(directory)), patch.object(main, "USER_SKILLS_DIR", Path(directory, "user")):
+            Path(directory, "coding.md").write_text("Use pytest.", encoding="utf-8")
+            instructions, missing = main.skill_instructions(["coding", "gone"])
+            self.assertIn("## Active skills", instructions)
+            self.assertIn("### coding\nUse pytest.", instructions)
+            self.assertEqual(missing, ["gone"])
+
+    def test_run_agent_sends_active_skill_in_instructions(self):
+        response = SimpleNamespace(output=[], output_text="Done", usage=None)
+        client = SimpleNamespace(responses=SimpleNamespace(create=Mock(return_value=response)))
+        with patch.object(main, "skill_instructions", return_value=("base\n## Active skills\n### coding", [])):
+            main.run_agent("hello", client, skills=["coding"])
+        self.assertEqual(client.responses.create.call_args.kwargs["instructions"], "base\n## Active skills\n### coding")

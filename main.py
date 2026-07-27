@@ -181,6 +181,24 @@ TOOL_HANDLERS = {
 
 MAX_TOOL_OUTPUT_CHARS = 12_000
 
+BUILTIN_SKILLS_DIR = Path(__file__).with_name("skills")
+USER_SKILLS_DIR = Path.home() / ".agents" / "skills"
+
+
+def available_skills() -> dict[str, Path]:
+    skills = {path.stem: path for path in sorted(BUILTIN_SKILLS_DIR.glob("*.md"))}
+    skills.update({path.stem: path for path in sorted(USER_SKILLS_DIR.glob("*.md"))})
+    return skills
+
+
+def skill_instructions(names: list[str]) -> tuple[str, list[str]]:
+    skills = available_skills()
+    missing = [name for name in names if name not in skills]
+    active = [f"### {name}\n{skills[name].read_text(encoding='utf-8')}" for name in names if name in skills]
+    suffix = "\n\n## Active skills\n\n" + "\n\n".join(active) if active else ""
+    return SYSTEM_PROMPT + suffix, missing
+
+
 RESET = "\033[0m"
 PALETTES = {
     "light": {
@@ -418,12 +436,13 @@ def handle_command(text: str) -> str | None:
     return f"Unknown command: {text.split()[0]}"
 
 
-def run_agent(task: str, client: OpenAI, history: list[object] | None = None, session_id: str | None = None) -> tuple[str, int, int | None, list[object]]:
+def run_agent(task: str, client: OpenAI, history: list[object] | None = None, session_id: str | None = None, skills: list[str] | None = None) -> tuple[str, int, int | None, list[object]]:
+    instructions, _missing = skill_instructions(skills or [])
     history = list(history or [])
     history.append({"role": "user", "content": task})
     response = client.responses.create(
         model=MODEL,
-        instructions=SYSTEM_PROMPT,
+        instructions=instructions,
         input=list(history),
         tools=TOOLS,
     )
@@ -451,7 +470,7 @@ def run_agent(task: str, client: OpenAI, history: list[object] | None = None, se
         history.extend(tool_outputs)
         response = client.responses.create(
             model=MODEL,
-            instructions=SYSTEM_PROMPT,
+            instructions=instructions,
             input=list(history),
             tools=TOOLS,
         )
