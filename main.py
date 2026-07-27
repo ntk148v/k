@@ -576,7 +576,7 @@ def main() -> None:
     finally:
         restore_terminal()
         save_session(session)
-        render("output", f"To resume this session: k --resume {session['id']}")
+        render("output", f"To resume this session: {sys.argv[0]} --resume {session['id']}")
 
 
 if __name__ == "__main__":

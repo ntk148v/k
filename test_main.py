@@ -318,6 +318,7 @@ class AgentTests(unittest.TestCase):
 
     def test_main_shows_resume_command_on_eof(self):
         with (
+            patch("sys.argv", ["./launch-k"]),
             patch("builtins.input", side_effect=EOFError),
             patch.object(main, "OpenAI"),
             patch.object(main, "new_session_id", return_value="resume-id"),
@@ -327,12 +328,13 @@ class AgentTests(unittest.TestCase):
         ):
             main.main()
         self.assertIn(
-            ("output", "To resume this session: k --resume resume-id"),
+            ("output", "To resume this session: ./launch-k --resume resume-id"),
             [call.args for call in render.call_args_list],
         )
 
     def test_main_shows_resume_command_on_unexpected_error(self):
         with (
+            patch("sys.argv", ["./launch-k"]),
             patch("builtins.input", side_effect=RuntimeError("boom")),
             patch.object(main, "OpenAI"),
             patch.object(main, "new_session_id", return_value="resume-id"),
@@ -343,7 +345,7 @@ class AgentTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "boom"):
                 main.main()
         self.assertIn(
-            ("output", "To resume this session: k --resume resume-id"),
+            ("output", "To resume this session: ./launch-k --resume resume-id"),
             [call.args for call in render.call_args_list],
         )
 
