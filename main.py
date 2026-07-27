@@ -181,14 +181,11 @@ TOOL_HANDLERS = {
 
 MAX_TOOL_OUTPUT_CHARS = 12_000
 
-BUILTIN_SKILLS_DIR = Path(__file__).with_name("skills")
 USER_SKILLS_DIR = Path.home() / ".agents" / "skills"
 
 
 def available_skills() -> dict[str, Path]:
-    skills = {path.stem: path for path in sorted(BUILTIN_SKILLS_DIR.glob("*.md"))}
-    skills.update({path.stem: path for path in sorted(USER_SKILLS_DIR.glob("*.md"))})
-    return skills
+    return {path.stem: path for path in sorted(USER_SKILLS_DIR.glob("*.md"))}
 
 
 def skill_instructions(names: list[str]) -> tuple[str, list[str]]:

@@ -329,19 +329,16 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(main.handle_command("/wat"), "Unknown command: /wat")
         self.assertIsNone(main.handle_command("write a file"))
 
-    def test_available_skills_lists_builtins_and_user_override(self):
-        with tempfile.TemporaryDirectory() as directory, patch.object(main, "BUILTIN_SKILLS_DIR", Path(directory, "builtins")), patch.object(main, "USER_SKILLS_DIR", Path(directory, "user")):
-            main.BUILTIN_SKILLS_DIR.mkdir()
-            main.USER_SKILLS_DIR.mkdir()
-            (main.BUILTIN_SKILLS_DIR / "coding.md").write_text("built-in", encoding="utf-8")
-            (main.USER_SKILLS_DIR / "coding.md").write_text("user", encoding="utf-8")
-            (main.USER_SKILLS_DIR / "review.md").write_text("review", encoding="utf-8")
+    def test_available_skills_lists_user_skills(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(main, "USER_SKILLS_DIR", Path(directory)):
+            (Path(directory) / "coding.md").write_text("Use pytest.", encoding="utf-8")
+            (Path(directory) / "review.md").write_text("Review code.", encoding="utf-8")
             skills = main.available_skills()
             self.assertEqual(list(skills), ["coding", "review"])
-            self.assertEqual(skills["coding"].read_text(encoding="utf-8"), "user")
+            self.assertEqual(skills["coding"].read_text(encoding="utf-8"), "Use pytest.")
 
     def test_skill_instructions_appends_active_skill_and_reports_missing(self):
-        with tempfile.TemporaryDirectory() as directory, patch.object(main, "BUILTIN_SKILLS_DIR", Path(directory)), patch.object(main, "USER_SKILLS_DIR", Path(directory, "user")):
+        with tempfile.TemporaryDirectory() as directory, patch.object(main, "USER_SKILLS_DIR", Path(directory)):
             Path(directory, "coding.md").write_text("Use pytest.", encoding="utf-8")
             instructions, missing = main.skill_instructions(["coding", "gone"])
             self.assertIn("## Active skills", instructions)
