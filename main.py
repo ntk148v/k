@@ -282,10 +282,11 @@ def render(kind: str, text: str) -> None:
 
 
 def run_agent(task: str, client: OpenAI) -> tuple[str, int, int | None]:
+    history: list[object] = [{"role": "user", "content": task}]
     response = client.responses.create(
         model=MODEL,
         instructions=SYSTEM_PROMPT,
-        input=task,
+        input=list(history),
         tools=TOOLS,
     )
     total_tokens = 0
@@ -307,10 +308,12 @@ def run_agent(task: str, client: OpenAI) -> tuple[str, int, int | None]:
         ]
         for call in calls:
             render("tool", f"{call.name}({call.arguments})")
+        history.extend(response.output)
+        history.extend(tool_outputs)
         response = client.responses.create(
             model=MODEL,
-            previous_response_id=response.id,
-            input=tool_outputs,
+            instructions=SYSTEM_PROMPT,
+            input=list(history),
             tools=TOOLS,
         )
 

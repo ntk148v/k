@@ -70,7 +70,12 @@ class AgentTests(unittest.TestCase):
 
         first_call, second_call = client.responses.create.call_args_list
         self.assertEqual(first_call.kwargs["model"], main.MODEL)
+        self.assertEqual(first_call.kwargs["input"], [{"role": "user", "content": "say hello"}])
         self.assertEqual(second_call.kwargs["model"], main.MODEL)
+        self.assertNotIn("previous_response_id", second_call.kwargs)
+        self.assertEqual(second_call.kwargs["input"][0], {"role": "user", "content": "say hello"})
+        self.assertIn(call, second_call.kwargs["input"])
+        self.assertEqual(second_call.kwargs["input"][-1]["call_id"], "call-1")
 
     def test_run_agent_tolerates_missing_usage(self):
         response = SimpleNamespace(id="resp-1", output=[], output_text="Done")
