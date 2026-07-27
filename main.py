@@ -181,7 +181,7 @@ TOOL_HANDLERS = {
 
 MAX_TOOL_OUTPUT_CHARS = 12_000
 
-USER_SKILLS_DIR = Path.home() / ".agent" / "skills"
+USER_SKILLS_DIR = Path.home() / ".agents" / "skills"
 
 
 def available_skills() -> dict[str, Path]:
