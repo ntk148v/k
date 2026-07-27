@@ -178,6 +178,8 @@ TOOL_HANDLERS = {
     "bash": bash,
 }
 
+MAX_TOOL_OUTPUT_CHARS = 12_000
+
 BANNER = "k\n\U0001f60e"
 
 
@@ -214,6 +216,21 @@ def save_session(session: dict) -> None:
     path.write_text(json.dumps(session, indent=2), encoding="utf-8")
 
 
+def compact_output(text: str, label: str, session_id: str | None = None) -> str:
+    if len(text) <= MAX_TOOL_OUTPUT_CHARS:
+        return text
+    head = text[:6_000]
+    tail = text[-2_000:]
+    saved = ""
+    if session_id:
+        artifact_dir = sessions_dir() / f"{session_id}-artifacts"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        artifact = artifact_dir / f"{label}-{datetime.now(timezone.utc).strftime('%H%M%S')}-{uuid4().hex[:6]}.txt"
+        artifact.write_text(text, encoding="utf-8")
+        saved = f"\nFull output saved: {artifact}"
+    return f"[context-mode: output compacted from {len(text)} chars]\n{head}\n...\n{tail}{saved}"
+
+
 SYSTEM_PROMPT = """You are an expert coding assistant. You help users with coding tasks by reading files, executing commands, editing code, and writing new files.
 
 Available tools:
@@ -232,7 +249,7 @@ Guidelines:
 - Show file paths clearly when working with files"""
 
 
-def dispatch_tool(name: str, arguments: str, call_id: str) -> dict:
+def dispatch_tool(name: str, arguments: str, call_id: str, session_id: str | None = None) -> dict:
     try:
         args = json.loads(arguments)
     except json.JSONDecodeError as e:
@@ -261,7 +278,7 @@ def dispatch_tool(name: str, arguments: str, call_id: str) -> dict:
     return {
         "type": "function_call_output",
         "call_id": call_id,
-        "output": result,
+        "output": compact_output(str(result), name, session_id),
     }
 
 
@@ -349,7 +366,7 @@ def handle_command(text: str) -> str | None:
     return f"Unknown command: {text.split()[0]}"
 
 
-def run_agent(task: str, client: OpenAI, history: list[object] | None = None) -> tuple[str, int, int | None, list[object]]:
+def run_agent(task: str, client: OpenAI, history: list[object] | None = None, session_id: str | None = None) -> tuple[str, int, int | None, list[object]]:
     history = list(history or [])
     history.append({"role": "user", "content": task})
     response = client.responses.create(
@@ -374,7 +391,7 @@ def run_agent(task: str, client: OpenAI, history: list[object] | None = None) ->
             return response.output_text, total_tokens, context_tokens, history
 
         tool_outputs = [
-            dispatch_tool(call.name, call.arguments, call.call_id) for call in calls
+            dispatch_tool(call.name, call.arguments, call.call_id, session_id) for call in calls
         ]
         for call in calls:
             render("tool", f"{call.name}({call.arguments})")
@@ -414,8 +431,7 @@ def main() -> None:
                 render("output", command)
                 continue
             try:
-                answer, total_tokens, context_tokens, history = run_agent(task, client, session["history"])
-                session["history"] = history
+                answer, total_tokens, context_tokens, history = run_agent(task, client, session["history"], session["id"])
                 session["transcript"].append({"prompt": task, "answer": answer})
                 save_session(session)
             except Exception as e:
