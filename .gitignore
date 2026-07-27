@@ -198,3 +198,5 @@ cython_debug/
 docs/superpowers/
 .superpowers/
 .superpowers/
+.pi-subagents/
+graphify-out/
