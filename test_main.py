@@ -347,6 +347,33 @@ class AgentTests(unittest.TestCase):
             [call.args for call in render.call_args_list],
         )
 
+    def test_main_persists_history_for_resume(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(main.Path, "home", return_value=Path(directory)):
+            with (
+                patch("builtins.input", side_effect=["hello", ""]),
+                patch.object(main, "OpenAI"),
+                patch.object(main, "new_session_id", return_value="resume-id"),
+                patch.object(main, "run_agent", return_value=("hi", 1, 1, ["saved-history"])),
+                patch.object(main, "render_pinned_status", return_value=True),
+                patch.object(main, "restore_terminal"),
+                patch.object(main, "render"),
+            ):
+                main.main()
+            self.assertEqual(main.load_session("resume-id")["history"], ["saved-history"])
+
+    def test_main_persists_session_before_first_prompt(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(main.Path, "home", return_value=Path(directory)):
+            with (
+                patch("builtins.input", side_effect=EOFError),
+                patch.object(main, "OpenAI"),
+                patch.object(main, "new_session_id", return_value="resume-id"),
+                patch.object(main, "render_pinned_status", return_value=True),
+                patch.object(main, "restore_terminal"),
+                patch.object(main, "render"),
+            ):
+                main.main()
+            self.assertEqual(main.load_session("resume-id")["id"], "resume-id")
+
     def test_session_round_trip_uses_home_k_sessions(self):
         with tempfile.TemporaryDirectory() as d:
             old_home = os.environ.get("HOME")

@@ -562,6 +562,7 @@ def main() -> None:
                 continue
             try:
                 answer, total_tokens, context_tokens, history = run_agent(task, client, session["history"], session["id"], session.get("skills", []))
+                session["history"] = history
                 session["transcript"].append({"prompt": task, "answer": answer})
                 save_session(session)
             except Exception as e:
@@ -574,6 +575,7 @@ def main() -> None:
         return
     finally:
         restore_terminal()
+        save_session(session)
         render("output", f"To resume this session: k --resume {session['id']}")
 
 
