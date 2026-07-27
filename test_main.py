@@ -1,6 +1,5 @@
 import io
 import os
-import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -119,7 +118,7 @@ class AgentTests(unittest.TestCase):
             main.render("status", "k | /repo | main")
         self.assertEqual(
             output.getvalue(),
-            "\033[38;2;90;128;128mk\033[38;2;108;108;108m | /repo | main\033[0m\n",
+            "\033[7m\033[38;2;90;128;128m k \033[0m\033[38;2;108;108;108m | /repo | main\033[0m\n",
         )
 
     def test_render_pinned_status_reserves_first_row_and_repositions_cursor(self):
@@ -132,7 +131,7 @@ class AgentTests(unittest.TestCase):
             self.assertTrue(main.render_pinned_status("k | /repo", move_cursor=True))
         self.assertEqual(
             output.getvalue(),
-            "\033[2;24r\033[1;1H\033[2K\033[38;2;90;128;128mk\033[38;2;108;108;108m | /repo\033[0m\n\033[2;1H",
+            "\033[2;24r\033[1;1H\033[2K\033[7m\033[38;2;90;128;128m k \033[0m\033[38;2;108;108;108m | /repo\033[0m\n\033[2;1H",
         )
 
     def test_render_pinned_status_can_repaint_without_moving_input_cursor(self):
@@ -145,7 +144,7 @@ class AgentTests(unittest.TestCase):
             self.assertTrue(main.render_pinned_status("k | /repo"))
         self.assertEqual(
             output.getvalue(),
-            "\033[s\033[2;24r\033[1;1H\033[2K\033[38;2;90;128;128mk\033[38;2;108;108;108m | /repo\033[0m\n\033[u",
+            "\033[s\033[2;24r\033[1;1H\033[2K\033[7m\033[38;2;90;128;128m k \033[0m\033[38;2;108;108;108m | /repo\033[0m\n\033[u",
         )
 
     def test_render_pinned_status_falls_back_when_stdout_is_not_a_tty(self):
@@ -302,10 +301,6 @@ class AgentTests(unittest.TestCase):
         ):
             main.main()
         self.assertEqual(restore.call_count, 1)
-
-    def test_banner_has_k_and_sunglasses(self):
-        self.assertEqual(main.BANNER.splitlines()[0].strip(), "k")
-        self.assertIn("\U0001f60e", main.BANNER)
 
     def test_session_round_trip_uses_home_k_sessions(self):
         with tempfile.TemporaryDirectory() as d:
