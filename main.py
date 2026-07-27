@@ -1,6 +1,5 @@
 import base64
 import json
-import mimetypes
 import os
 import subprocess
 import sys
@@ -9,7 +8,9 @@ from pathlib import Path
 from dotenv import load_dotenv
 from openai import OpenAI
 
-MODEL = "openrouter/free"
+load_dotenv()
+
+MODEL = os.getenv("OPENAI_MODEL_NAME", "openrouter/free")
 
 IMAGE_TYPES = {
     ".jpg": "image/jpeg",
@@ -224,6 +225,32 @@ def dispatch_tool(name: str, arguments: str, call_id: str) -> dict:
     }
 
 
+def git_branch() -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=Path.cwd(),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError:
+        return None
+    return result.stdout.strip() or None
+
+
+def status_line(total_tokens: int | str, context_tokens: int | None) -> str:
+    parts = ["k", str(Path.cwd())]
+    if branch := git_branch():
+        parts.append(branch)
+    context = context_tokens if context_tokens is not None else "?"
+    parts.extend(
+        [f"model: {MODEL}", f"tokens: {total_tokens}", f"context: {context}"]
+    )
+    return " | ".join(parts)
+
+
 def render(kind: str, text: str) -> None:
     is_tty = sys.stdout.isatty()
     if kind == "title":
@@ -289,7 +316,6 @@ def run_agent(task: str, client: OpenAI) -> tuple[str, int, int | None]:
 
 
 def main() -> None:
-    load_dotenv()
     render("title", "k")
     task = input("\u203a ").strip()
     if not task:

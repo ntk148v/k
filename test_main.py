@@ -92,3 +92,19 @@ class AgentTests(unittest.TestCase):
             main.render("tool", "read file.txt")
         self.assertNotIn("\x1b[", output.getvalue())
         self.assertIn("read file.txt", output.getvalue())
+
+    def test_status_line_includes_k_directory_branch_and_metrics(self):
+        with patch.object(main, "git_branch", return_value="main"):
+            line = main.status_line(21, 9)
+        self.assertIn("k", line)
+        self.assertIn(str(Path.cwd()), line)
+        self.assertIn("main", line)
+        self.assertIn(f"model: {main.MODEL}", line)
+        self.assertIn("tokens: 21", line)
+        self.assertIn("context: 9", line)
+
+    def test_status_line_omits_branch_when_unavailable(self):
+        with patch.object(main, "git_branch", return_value=None):
+            line = main.status_line(0, None)
+        self.assertNotIn("branch:", line)
+        self.assertIn("context: ?", line)
