@@ -227,6 +227,10 @@ class AgentTests(unittest.TestCase):
             main.main()
         self.assertEqual(restore.call_count, 1)
 
+    def test_banner_has_k_and_sunglasses(self):
+        self.assertEqual(main.BANNER.splitlines()[0].strip(), "k")
+        self.assertIn("\U0001f60e", main.BANNER)
+
     def test_session_round_trip_uses_home_k_sessions(self):
         with tempfile.TemporaryDirectory() as d:
             old_home = os.environ.get("HOME")

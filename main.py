@@ -178,6 +178,12 @@ TOOL_HANDLERS = {
     "bash": bash,
 }
 
+BANNER = "k\n\U0001f60e"
+
+
+def render_banner() -> None:
+    render("status", BANNER)
+
 
 def k_dir() -> Path:
     return Path.home() / ".k"
@@ -392,6 +398,7 @@ def main() -> None:
         if sys.stdout.isatty():
             sys.stdout.write("\033[2J\033[H")
             sys.stdout.flush()
+        render_banner()
         render_pinned_status(status_line("?", None), move_cursor=True)
         while True:
             try:
