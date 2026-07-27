@@ -30,7 +30,7 @@ k | /path/to/project | main | model: openrouter/free | tokens: 1234 | context: 5
 
 Tool calls use self-contained request history, which works with OpenAI-compatible providers that do not support `previous_response_id` lookups.
 
-Output uses the terminal default foreground for final answers, bright blue for tool calls, bright red for errors, and inverse video for the status line. Common Markdown in final answers is styled without changing non-interactive output.
+Output uses Pi-inspired truecolor light and dark palettes: colored Markdown, blue tool calls, red errors, and an accent-plus-muted status line with no background. Select one with `--theme light` or `--theme dark` (light is the default).
 
 ## Commands
 

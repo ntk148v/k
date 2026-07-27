@@ -184,49 +184,62 @@ MAX_TOOL_OUTPUT_CHARS = 12_000
 BANNER = "k\n\U0001f60e"
 
 RESET = "\033[0m"
-ANSWER = ""
-TOOL = "\033[94m"
-ERROR = "\033[91m"
-CODE = "\033[7m"
+PALETTES = {
+    "light": {
+        "text": "#1f2328", "accent": "#5a8080", "muted": "#6c6c6c",
+        "tool": "#547da7", "error": "#aa5555", "heading": "#9a7326",
+        "code": "#5a8080", "code_block": "#588458", "list": "#588458",
+    },
+    "dark": {
+        "text": "#d4d4d4", "accent": "#8abeb7", "muted": "#808080",
+        "tool": "#5f87ff", "error": "#cc6666", "heading": "#f0c674",
+        "code": "#8abeb7", "code_block": "#b5bd68", "list": "#8abeb7",
+    },
+}
+COLORS: dict[str, str] = {}
+
+
+def set_theme(name: str) -> None:
+    palette = PALETTES.get(name, PALETTES["light"])
+    COLORS.clear()
+    COLORS.update({key: f"\033[38;2;{int(value[1:3], 16)};{int(value[3:5], 16)};{int(value[5:7], 16)}m" for key, value in palette.items()})
+
+
+def color(name: str) -> str:
+    return COLORS[name]
+
+
+set_theme(os.getenv("K_THEME", "light"))
 
 
 def _inline(line: str) -> str:
-    line = re.sub(r"`([^`]+)`", lambda m: f"{CODE}{m.group(1)}{RESET}", line)
-    line = re.sub(r"\*\*([^*]+)\*\*", lambda m: f"\033[1m{m.group(1)}{RESET}", line)
-    line = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)", lambda m: f"\033[3m{m.group(1)}{RESET}", line)
+    line = re.sub(r"`([^`]+)`", lambda m: f"{color('code')}{m.group(1)}{color('text')}", line)
+    line = re.sub(r"\*\*([^*]+)\*\*", lambda m: f"\033[1m{m.group(1)}{RESET}{color('text')}", line)
+    line = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)", lambda m: f"\033[3m{m.group(1)}{RESET}{color('text')}", line)
     return line
 
 
 def format_markdown(text: str) -> str:
-    lines = text.splitlines()
     in_fence = False
     result = []
-    for line in lines:
+    for line in text.splitlines():
         if line.startswith("```"):
-            result.append(f"{ANSWER}{CODE}{line}{RESET}")
+            result.append(f"{color('muted')}{line}{RESET}")
             in_fence = not in_fence
-            continue
-        if in_fence:
-            result.append(f"{ANSWER}{CODE}{line}{RESET}")
-            continue
-
-        if m := re.match(r"^(#{1,6})\s+(.*)$", line):
-            result.append(f"{ANSWER}\033[1m{_inline(m.group(2))}{ANSWER}{RESET}")
-            continue
-        if m := re.match(r"^\s*[-*+]\s+(.*)$", line):
-            result.append(f"{ANSWER}• {_inline(m.group(1))}{RESET}")
-            continue
-        if m := re.match(r"^\s*(\d+)\.\s+(.*)$", line):
-            result.append(f"{ANSWER}{m.group(1)}. {_inline(m.group(2))}{RESET}")
-            continue
-        if m := re.match(r"^>\s?(.*)$", line):
-            result.append(f"{ANSWER}│ {_inline(m.group(1))}{RESET}")
-            continue
-        if m := re.match(r"^\s{0,3}([-*_])(?:\s*\1){2,}\s*$", line):
-            result.append(f"{ANSWER}{'─' * 3}{RESET}")
-            continue
-
-        result.append(f"{ANSWER}{_inline(line)}{RESET}")
+        elif in_fence:
+            result.append(f"{color('code_block')}{line}{RESET}")
+        elif m := re.match(r"^(#{1,6})\s+(.*)$", line):
+            result.append(f"{color('heading')}\033[1m{_inline(m.group(2))}{RESET}")
+        elif m := re.match(r"^\s*[-*+]\s+(.*)$", line):
+            result.append(f"{color('list')}• {color('text')}{_inline(m.group(1))}{RESET}")
+        elif m := re.match(r"^\s*(\d+)\.\s+(.*)$", line):
+            result.append(f"{color('list')}{m.group(1)}. {color('text')}{_inline(m.group(2))}{RESET}")
+        elif m := re.match(r"^>\s?(.*)$", line):
+            result.append(f"{color('muted')}│ {m.group(1)}{RESET}")
+        elif re.match(r"^\s{0,3}([-*_])(?:\s*\1){2,}\s*$", line):
+            result.append(f"{color('muted')}{'─' * 3}{RESET}")
+        else:
+            result.append(f"{color('text')}{_inline(line)}{RESET}")
     return "\n".join(result)
 
 
@@ -359,17 +372,18 @@ def render(kind: str, text: str) -> None:
     is_tty = sys.stdout.isatty()
     if kind == "tool":
         if is_tty:
-            sys.stdout.write(f"  {TOOL}{text}{RESET}\n")
+            sys.stdout.write(f"  {color('tool')}{text}{RESET}\n")
         else:
             sys.stdout.write(f"  {text}\n")
     elif kind == "output":
         if is_tty:
-            sys.stdout.write(f"{ERROR}{text}{RESET}\n")
+            sys.stdout.write(f"{color('error')}{text}{RESET}\n")
         else:
             sys.stdout.write(f"{text}\n")
     elif kind == "status":
         if is_tty:
-            sys.stdout.write("\n".join(f"\033[7m{line}{RESET}" for line in text.splitlines()) + "\n")
+            lines = [f"{color('accent')}k{color('muted')}{line[1:]}{RESET}" if line.startswith("k") else f"{color('muted')}{line}{RESET}" for line in text.splitlines()]
+            sys.stdout.write("\n".join(lines) + "\n")
         else:
             sys.stdout.write(f"{text}\n")
     elif kind == "answer":
@@ -453,7 +467,9 @@ def run_agent(task: str, client: OpenAI, history: list[object] | None = None, se
 def main() -> None:
     parser = argparse.ArgumentParser(prog="k")
     parser.add_argument("--resume", metavar="ID")
+    parser.add_argument("--theme", choices=PALETTES, default=os.getenv("K_THEME", "light"))
     args, _ = parser.parse_known_args()
+    set_theme(args.theme)
     session = load_session(args.resume) if args.resume else {"id": new_session_id(), "history": [], "transcript": []}
     client = OpenAI()
     try:
