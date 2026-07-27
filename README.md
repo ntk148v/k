@@ -10,7 +10,15 @@ Set `OPENAI_API_KEY` in `.env` or your environment, then run:
 uv run python main.py
 ```
 
-Enter coding tasks at `❯`. `k` stays open for additional tasks; submit a blank prompt, send EOF (Ctrl+D), or press Ctrl+C to exit cleanly. The agent can use `read`, `write`, `edit`, and `bash` in the current working directory.
+Resume a saved session by ID:
+
+```bash
+uv run python main.py --resume 20260727-120000-ab12cd
+```
+
+Enter coding tasks at `❯`. Use `/quit`, submit a blank prompt, send EOF (Ctrl+D), or press Ctrl+C to exit cleanly.
+
+Sessions are saved automatically to `~/.k/sessions/<id>.json` after each completed answer.
 
 In an interactive terminal, `k` pins its statusline to the top row and keeps prompts, tool calls, answers, and errors scrollable below it. On a redirected or non-interactive stream, it falls back to ordinary line-by-line output.
 
@@ -23,3 +31,27 @@ k | /path/to/project | main | model: openrouter/free | tokens: 1234 | context: 5
 Tool calls use self-contained request history, which works with OpenAI-compatible providers that do not support `previous_response_id` lookups.
 
 Output is color-coded in a terminal: red `k` and grey status text, cyan tool calls, yellow errors, and green answers.
+
+## Commands
+
+- `/quit` exits without calling the model.
+
+## Context-mode
+
+`k` keeps large tool outputs out of the model context. Oversized outputs are compacted to a useful head/tail preview, and the full text is saved beside the session under `~/.k/sessions/<id>-artifacts/`.
+
+## Tools
+
+The agent can use `read`, `write`, `edit`, and `bash` in the current working directory.
+
+## Build the first minimal agent
+
+The smallest useful coding agent needs:
+
+1. A system prompt that says what the agent can do.
+2. A short tool list with JSON schemas.
+3. A loop that sends user input to the model.
+4. A dispatcher that runs requested tools and feeds results back.
+5. A session file so the loop can resume later.
+
+Start boring: one file, stdlib first, no plugin system, no database, no framework. Add structure only when the file becomes hard to change.
