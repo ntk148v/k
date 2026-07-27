@@ -26,39 +26,52 @@ IMAGE_TYPES = {
 
 
 def read(path: str, offset: int = 1, limit: int = 2000) -> str | list[dict[str, str]]:
-    target = Path(path)
-    if target.suffix.lower() in IMAGE_TYPES:
-        data = base64.b64encode(target.read_bytes()).decode()
-        return [
-            {
-                "type": "input_image",
-                "image_url": f"data:{IMAGE_TYPES[target.suffix.lower()]};base64,{data}",
-            }
-        ]
-    lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
-    return "\n".join(
-        f"{number}: {line}"
-        for number, line in enumerate(
-            lines[max(offset - 1, 0) : max(offset - 1, 0) + max(limit, 0)],
-            start=max(offset, 1),
+    if offset < 1:
+        return "Error: offset must be at least 1"
+    if limit < 1:
+        return "Error: limit must be at least 1"
+    try:
+        target = Path(path)
+        if target.suffix.lower() in IMAGE_TYPES:
+            data = base64.b64encode(target.read_bytes()).decode()
+            return [
+                {
+                    "type": "input_image",
+                    "image_url": f"data:{IMAGE_TYPES[target.suffix.lower()]};base64,{data}",
+                }
+            ]
+        lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
+        return "\n".join(
+            f"{number}: {line}"
+            for number, line in enumerate(
+                lines[offset - 1 : offset - 1 + limit],
+                start=offset,
+            )
         )
-    )
+    except (OSError, ValueError) as error:
+        return f"Error: cannot read {path}: {error}"
 
 
 def write(path: str, content: str) -> str:
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(content, encoding="utf-8")
-    return f"Wrote {target}"
+    try:
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        return f"Wrote {target}"
+    except (OSError, ValueError) as error:
+        return f"Error: cannot write {path}: {error}"
 
 
 def edit(path: str, oldText: str, newText: str) -> str:
-    target = Path(path)
-    content = target.read_text(encoding="utf-8", errors="replace")
-    if content.count(oldText) != 1:
-        return "Error: oldText must occur exactly once"
-    target.write_text(content.replace(oldText, newText, 1), encoding="utf-8")
-    return f"Edited {target}"
+    try:
+        target = Path(path)
+        content = target.read_text(encoding="utf-8", errors="replace")
+        if content.count(oldText) != 1:
+            return "Error: oldText must occur exactly once"
+        target.write_text(content.replace(oldText, newText, 1), encoding="utf-8")
+        return f"Edited {target}"
+    except (OSError, ValueError) as error:
+        return f"Error: cannot edit {path}: {error}"
 
 
 def bash(command: str, timeout: int | None = None) -> str:

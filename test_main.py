@@ -48,6 +48,15 @@ class ToolTests(unittest.TestCase):
     def test_bash_returns_combined_output(self):
         self.assertIn("hello", main.bash("python -c \"print('hello')\""))
 
+    def test_read_rejects_non_positive_paging(self):
+        self.assertEqual(main.read("notes.txt", offset=0), "Error: offset must be at least 1")
+        self.assertEqual(main.read("notes.txt", limit=0), "Error: limit must be at least 1")
+
+    def test_tools_return_errors_for_missing_files(self):
+        missing = "/definitely-missing-k-file"
+        self.assertTrue(main.read(missing).startswith("Error: cannot read"))
+        self.assertTrue(main.edit(missing, "old", "new").startswith("Error: cannot edit"))
+
 
 class AgentTests(unittest.TestCase):
     def test_dispatch_reports_bad_json_and_unknown_tools(self):
