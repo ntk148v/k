@@ -1,6 +1,7 @@
 import base64
 import argparse
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -182,6 +183,53 @@ MAX_TOOL_OUTPUT_CHARS = 12_000
 
 BANNER = "k\n\U0001f60e"
 
+RESET = "\033[0m"
+ANSWER = "\033[93m"
+TOOL = "\033[94m"
+ERROR = "\033[91m"
+STATUS = "\033[37m"
+CODE = "\033[37m"
+
+
+def _inline(line: str) -> str:
+    line = re.sub(r"`([^`]+)`", lambda m: f"{CODE}{m.group(1)}{ANSWER}", line)
+    line = re.sub(r"\*\*([^*]+)\*\*", lambda m: f"\033[1m{m.group(1)}{ANSWER}", line)
+    line = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)", lambda m: f"\033[3m{m.group(1)}{ANSWER}", line)
+    return line
+
+
+def format_markdown(text: str) -> str:
+    lines = text.splitlines()
+    in_fence = False
+    result = []
+    for line in lines:
+        if line.startswith("```"):
+            result.append(f"{ANSWER}{CODE}{line}{RESET}")
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            result.append(f"{ANSWER}{CODE}{line}{RESET}")
+            continue
+
+        if m := re.match(r"^(#{1,6})\s+(.*)$", line):
+            result.append(f"{ANSWER}\033[1m{_inline(m.group(2))}{ANSWER}{RESET}")
+            continue
+        if m := re.match(r"^\s*[-*+]\s+(.*)$", line):
+            result.append(f"{ANSWER}• {_inline(m.group(1))}{RESET}")
+            continue
+        if m := re.match(r"^\s*(\d+)\.\s+(.*)$", line):
+            result.append(f"{ANSWER}{m.group(1)}. {_inline(m.group(2))}{RESET}")
+            continue
+        if m := re.match(r"^>\s?(.*)$", line):
+            result.append(f"{ANSWER}\033[37m│ {_inline(m.group(1))}{RESET}")
+            continue
+        if m := re.match(r"^\s{0,3}([-*_])(?:\s*\1){2,}\s*$", line):
+            result.append(f"{ANSWER}\033[37m{'─' * 3}{RESET}")
+            continue
+
+        result.append(f"{ANSWER}{_inline(line)}{RESET}")
+    return "\n".join(result)
+
 
 def render_banner() -> None:
     render("status", BANNER)
@@ -312,24 +360,24 @@ def render(kind: str, text: str) -> None:
     is_tty = sys.stdout.isatty()
     if kind == "tool":
         if is_tty:
-            sys.stdout.write(f"  \033[36m{text}\033[0m\n")
+            sys.stdout.write(f"  {TOOL}{text}{RESET}\n")
         else:
             sys.stdout.write(f"  {text}\n")
     elif kind == "output":
         if is_tty:
-            sys.stdout.write(f"\033[33m{text}\033[0m\n")
+            sys.stdout.write(f"{ERROR}{text}{RESET}\n")
         else:
             sys.stdout.write(f"{text}\n")
     elif kind == "status":
         if is_tty and text.startswith("k"):
-            sys.stdout.write(f"\033[31mk\033[90m{text[1:]}\033[0m\n")
+            sys.stdout.write(f"{ANSWER}k{STATUS}{text[1:]}{RESET}\n")
         elif is_tty:
-            sys.stdout.write(f"\033[90m{text}\033[0m\n")
+            sys.stdout.write(f"{STATUS}{text}{RESET}\n")
         else:
             sys.stdout.write(f"{text}\n")
     elif kind == "answer":
         if is_tty:
-            sys.stdout.write(f"\033[32m{text}\033[0m\n")
+            sys.stdout.write(f"{format_markdown(text)}\n")
         else:
             sys.stdout.write(f"{text}\n")
     sys.stdout.flush()

@@ -196,3 +196,5 @@ cython_debug/
 *.vsix
 
 docs/superpowers/
+.superpowers/
+.superpowers/
