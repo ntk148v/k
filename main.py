@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -253,12 +254,7 @@ def status_line(total_tokens: int | str, context_tokens: int | None) -> str:
 
 def render(kind: str, text: str) -> None:
     is_tty = sys.stdout.isatty()
-    if kind == "title":
-        if is_tty:
-            sys.stdout.write(f"\033[2m{text}\033[0m\n")
-        else:
-            sys.stdout.write(f"{text}\n")
-    elif kind == "tool":
+    if kind == "tool":
         if is_tty:
             sys.stdout.write(f"  \033[36m{text}\033[0m\n")
         else:
@@ -269,8 +265,10 @@ def render(kind: str, text: str) -> None:
         else:
             sys.stdout.write(f"{text}\n")
     elif kind == "status":
-        if is_tty:
-            sys.stdout.write(f"\033[35m{text}\033[0m\n")
+        if is_tty and text.startswith("k"):
+            sys.stdout.write(f"\033[31mk\033[90m{text[1:]}\033[0m\n")
+        elif is_tty:
+            sys.stdout.write(f"\033[90m{text}\033[0m\n")
         else:
             sys.stdout.write(f"{text}\n")
     elif kind == "answer":
@@ -279,6 +277,27 @@ def render(kind: str, text: str) -> None:
         else:
             sys.stdout.write(f"{text}\n")
     sys.stdout.flush()
+
+
+def render_pinned_status(text: str) -> bool:
+    if not sys.stdout.isatty():
+        render("status", text)
+        return False
+    rows = shutil.get_terminal_size(fallback=(80, 24)).lines
+    if rows < 3:
+        render("status", text)
+        return False
+    sys.stdout.write(f"\033[2;{rows}r\033[1;1H\033[2K")
+    render("status", text)
+    sys.stdout.write("\033[2;1H")
+    sys.stdout.flush()
+    return True
+
+
+def restore_terminal() -> None:
+    if sys.stdout.isatty():
+        sys.stdout.write("\033[r\033[0m\n")
+        sys.stdout.flush()
 
 
 def run_agent(task: str, client: OpenAI) -> tuple[str, int, int | None]:

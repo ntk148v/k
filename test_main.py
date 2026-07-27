@@ -1,4 +1,5 @@
 import io
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -87,10 +88,42 @@ class AgentTests(unittest.TestCase):
             main.render("status", "model: openrouter/free | tokens: 21 | context: 9")
         self.assertEqual(output.getvalue(), "model: openrouter/free | tokens: 21 | context: 9\n")
 
-    def test_render_status_is_magenta_in_a_tty(self):
-        with patch("sys.stdout", new_callable=io.StringIO) as output, patch.object(output, "isatty", return_value=True):
-            main.render("status", "metrics")
-        self.assertEqual(output.getvalue(), "\033[35mmetrics\033[0m\n")
+    def test_render_status_colors_k_red_and_remainder_grey_in_a_tty(self):
+        with patch("sys.stdout", new_callable=io.StringIO) as output, patch.object(
+            output, "isatty", return_value=True
+        ):
+            main.render("status", "k | /repo | main")
+        self.assertEqual(
+            output.getvalue(),
+            "\033[31mk\033[90m | /repo | main\033[0m\n",
+        )
+
+    def test_render_pinned_status_reserves_first_row_and_repositions_cursor(self):
+        size = SimpleNamespace(lines=24)
+        with (
+            patch("sys.stdout", new_callable=io.StringIO) as output,
+            patch.object(output, "isatty", return_value=True),
+            patch.object(main.shutil, "get_terminal_size", return_value=size),
+        ):
+            self.assertTrue(main.render_pinned_status("k | /repo"))
+        self.assertEqual(
+            output.getvalue(),
+            "\033[2;24r\033[1;1H\033[2K\033[31mk\033[90m | /repo\033[0m\n\033[2;1H",
+        )
+
+    def test_render_pinned_status_falls_back_when_stdout_is_not_a_tty(self):
+        with patch("sys.stdout", new_callable=io.StringIO) as output, patch.object(
+            output, "isatty", return_value=False
+        ):
+            self.assertFalse(main.render_pinned_status("k | /repo"))
+        self.assertEqual(output.getvalue(), "k | /repo\n")
+
+    def test_restore_terminal_restores_the_default_scroll_region(self):
+        with patch("sys.stdout", new_callable=io.StringIO) as output, patch.object(
+            output, "isatty", return_value=True
+        ):
+            main.restore_terminal()
+        self.assertEqual(output.getvalue(), "\033[r\033[0m\n")
 
     def test_render_has_no_ansi_when_stdout_is_not_a_tty(self):
         with patch.object(main.sys.stdout, "isatty", return_value=False), patch("sys.stdout", new_callable=io.StringIO) as output:
