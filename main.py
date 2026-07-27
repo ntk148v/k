@@ -288,7 +288,15 @@ def session_path(session_id: str) -> Path:
 
 
 def load_session(session_id: str) -> dict:
-    return json.loads(session_path(session_id).read_text(encoding="utf-8"))
+    if "/" in session_id or "\\" in session_id or session_id in {"", ".", ".."}:
+        raise ValueError("cannot load session: invalid id")
+    try:
+        session = json.loads(session_path(session_id).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"cannot load session: {error}") from None
+    if not isinstance(session, dict):
+        raise ValueError("cannot load session: expected an object")
+    return session
 
 
 def save_session(session: dict) -> None:
@@ -515,7 +523,12 @@ def main() -> None:
     parser.add_argument("--theme", choices=PALETTES, default=os.getenv("K_THEME", "light"))
     args, _ = parser.parse_known_args()
     set_theme(args.theme)
-    session = load_session(args.resume) if args.resume else {"id": new_session_id(), "history": [], "transcript": [], "skills": []}
+    session = {"id": new_session_id(), "history": [], "transcript": [], "skills": []}
+    if args.resume:
+        try:
+            session = load_session(args.resume)
+        except ValueError as error:
+            render("output", f"Error: {error}")
     client = OpenAI()
     try:
         if sys.stdout.isatty():

@@ -373,6 +373,27 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(main.handle_skill_command("/skill ../secret", session), "Invalid skill name")
         self.assertEqual(main.handle_skill_command("/skill missing", session), "Unknown skill: missing")
 
+    def test_load_session_rejects_invalid_json(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(main.Path, "home", return_value=Path(directory)):
+            path = Path(directory) / ".k" / "sessions" / "bad.json"
+            path.parent.mkdir(parents=True)
+            path.write_text("{", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "cannot load session"):
+                main.load_session("bad")
+
+    def test_main_starts_new_session_when_resume_is_invalid(self):
+        with (
+            patch("sys.argv", ["k", "--resume", "bad"]),
+            patch.object(main, "load_session", side_effect=ValueError("cannot load session: invalid JSON")),
+            patch("builtins.input", side_effect=[""]),
+            patch.object(main, "OpenAI"),
+            patch.object(main, "render_pinned_status", return_value=True),
+            patch.object(main, "restore_terminal"),
+            patch.object(main, "render") as render,
+        ):
+            main.main()
+        self.assertIn(("output", "Error: cannot load session: invalid JSON"), [call.args for call in render.call_args_list])
+
     def test_session_round_trip_keeps_skills(self):
         with tempfile.TemporaryDirectory() as d, patch.object(main.Path, "home", return_value=Path(d)):
             session = {"id": "abc123", "history": [], "transcript": [], "skills": ["coding"]}
