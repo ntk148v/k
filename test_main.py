@@ -9,6 +9,78 @@ from unittest.mock import Mock, patch
 import main
 
 
+class IdentityTests(unittest.TestCase):
+    """Tests for helper/identity functions that don't need complex mocking."""
+
+    def test_new_session_id_returns_formatted_stamp(self):
+        sid = main.new_session_id()
+        # Format: YYYYMMDD-HHMMSS-xxxxxx
+        self.assertRegex(sid, r"^\d{8}-\d{6}-[0-9a-f]{6}$")
+
+    def test_k_dir_returns_home_dot_k(self):
+        self.assertEqual(str(main.k_dir()), str(Path.home() / ".k"))
+
+    def test_sessions_dir_returns_k_sessions(self):
+        self.assertEqual(main.sessions_dir(), Path.home() / ".k" / "sessions")
+
+    def test_session_path_constructs_json_path(self):
+        self.assertEqual(main.session_path("abc"), main.sessions_dir() / "abc.json")
+
+    def test_session_path_rejects_invalid_ids(self):
+        for bad in ("", ".", "..", "foo/bar", "foo\\bar"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError, msg=f"invalid session id not raised for {bad!r}"):
+                    main.session_path(bad)
+
+    def test_load_session_rejects_invalid_id(self):
+        with self.assertRaisesRegex(ValueError, "cannot load session: invalid id"):
+            main.load_session("../escape")
+
+    def test_load_session_rejects_non_dict_json(self):
+        with tempfile.TemporaryDirectory() as d, patch.object(main.Path, "home", return_value=Path(d)):
+            path = main.session_path("arr")
+            path.parent.mkdir(parents=True)
+            path.write_text("[]", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "expected an object"):
+                main.load_session("arr")
+
+    def test_load_session_reports_oserror(self):
+        with patch.object(main.Path, "home", return_value=Path("/nonexistent-k-dir-for-testing")):
+            with self.assertRaisesRegex(ValueError, "cannot load session"):
+                main.load_session("ghost")
+
+    def test_git_branch_returns_none_on_oserror(self):
+        with patch.object(main.subprocess, "run", side_effect=OSError("no git")):
+            self.assertIsNone(main.git_branch())
+
+    def test_format_markdown_handles_empty_string(self):
+        self.assertEqual(main.format_markdown(""), "")
+
+    def test_restore_terminal_does_nothing_when_not_a_tty(self):
+        with patch("sys.stdout", new_callable=io.StringIO) as output, patch.object(
+            output, "isatty", return_value=False
+        ):
+            main.restore_terminal()
+        self.assertEqual(output.getvalue(), "")
+
+    def test_render_pinned_status_falls_back_when_terminal_too_small(self):
+        size = SimpleNamespace(lines=2)
+        with (
+            patch("sys.stdout", new_callable=io.StringIO) as output,
+            patch.object(output, "isatty", return_value=True),
+            patch.object(main.shutil, "get_terminal_size", return_value=size),
+        ):
+            result = main.render_pinned_status("k | /repo")
+        self.assertFalse(result)
+        self.assertIn("k | /repo", output.getvalue())
+
+    def test_set_theme_dark_switches_palette(self):
+        main.set_theme("dark")
+        self.assertIn("\033[38;2;133;190;183m", main.color("accent"))
+        main.set_theme("light")
+        self.assertIn("\033[38;2;90;128;128m", main.color("accent"))
+
+
 class ReadlineTests(unittest.TestCase):
     def test_readline_is_loaded_for_interactive_history(self):
         self.assertIsNotNone(getattr(main, "readline", None))
@@ -61,6 +133,34 @@ class ToolTests(unittest.TestCase):
         missing = "/definitely-missing-k-file"
         self.assertTrue(main.read(missing).startswith("Error: cannot read"))
         self.assertTrue(main.edit(missing, "old", "new").startswith("Error: cannot edit"))
+
+    def test_bash_timeout_returns_error_message(self):
+        result = main.bash("sleep 60", timeout=0)
+        self.assertTrue(result.startswith("Error: command timed out"))
+
+    def test_bash_oserror_returns_error_message(self):
+        with patch.object(main.subprocess, "run", side_effect=OSError("broken")):
+            result = main.bash("anything")
+        self.assertIn("Error:", result)
+        self.assertIn("broken", result)
+
+    def test_write_returns_error_for_unwritable_path(self):
+        result = main.write("/nonexistent-dir-12345/file.txt", "content")
+        self.assertTrue(result.startswith("Error: cannot write"))
+
+    def test_dispatch_tool_catches_handler_exception(self):
+        def broken(**kwargs):
+            raise ValueError("oops")
+
+        with patch.dict(main.TOOL_HANDLERS, {"broken": broken}):
+            result = main.dispatch_tool("broken", "{}", "call-1")
+        self.assertEqual(result["call_id"], "call-1")
+        self.assertIn("oops", result["output"])
+
+    def test_dispatch_tool_returns_list_output_untouched(self):
+        with patch.dict(main.TOOL_HANDLERS, {"list_tool": lambda **kw: [{"type": "input_image", "image_url": "data:img"}]}):
+            result = main.dispatch_tool("list_tool", "{}", "call-1")
+        self.assertEqual(result["output"], [{"type": "input_image", "image_url": "data:img"}])
 
 
 class AgentTests(unittest.TestCase):
