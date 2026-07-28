@@ -213,6 +213,28 @@ class AgentTests(unittest.TestCase):
         self.assertIn(call, second_call.kwargs["input"])
         self.assertEqual(second_call.kwargs["input"][-1]["call_id"], "call-1")
 
+    def test_run_agent_uses_chat_completions_for_compatible_providers(self):
+        call = SimpleNamespace(id="call-1", function=SimpleNamespace(name="bash", arguments='{"command": "echo hello"}'))
+        first_message = SimpleNamespace(content=None, tool_calls=[call])
+        second_message = SimpleNamespace(content="Done", tool_calls=[])
+        first = SimpleNamespace(choices=[SimpleNamespace(message=first_message)], usage=SimpleNamespace(prompt_tokens=5, completion_tokens=3))
+        second = SimpleNamespace(choices=[SimpleNamespace(message=second_message)], usage=SimpleNamespace(prompt_tokens=9, completion_tokens=4))
+        client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=Mock(side_effect=[first, second]))))
+
+        with patch.object(main, "API_MODE", "chat-completions"), patch.object(main, "bash", return_value="hello"):
+            self.assertEqual(main.run_agent("say hello", client)[:3], ("Done", 21, 9))
+
+        first_call, second_call = client.chat.completions.create.call_args_list
+        self.assertEqual(first_call.kwargs["model"], main.MODEL)
+        self.assertEqual(first_call.kwargs["messages"], [{"role": "system", "content": main.SYSTEM_PROMPT}, {"role": "user", "content": "say hello"}])
+        self.assertEqual(second_call.kwargs["messages"][-1], {"role": "tool", "tool_call_id": "call-1", "content": "hello"})
+        self.assertEqual(first_call.kwargs["tools"], main.CHAT_TOOLS)
+
+    def test_run_agent_rejects_unknown_api_mode(self):
+        with patch.object(main, "API_MODE", "unknown"):
+            with self.assertRaisesRegex(RuntimeError, "K_API_MODE"):
+                main.run_agent("hello", SimpleNamespace())
+
     def test_run_agent_tolerates_missing_usage(self):
         response = SimpleNamespace(id="resp-1", output=[], output_text="Done")
         client = SimpleNamespace(responses=SimpleNamespace(create=Mock(return_value=response)))

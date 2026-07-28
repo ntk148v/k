@@ -17,6 +17,7 @@ from openai import OpenAI
 load_dotenv()
 
 MODEL = os.getenv("OPENAI_MODEL_NAME", "openrouter/free")
+API_MODE = os.getenv("K_API_MODE", "responses")
 
 IMAGE_TYPES = {
     ".jpg": "image/jpeg",
@@ -184,6 +185,19 @@ TOOLS = [
         },
         "strict": True,
     },
+]
+
+CHAT_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": tool["name"],
+            "description": tool["description"],
+            "parameters": tool["parameters"],
+            "strict": tool["strict"],
+        },
+    }
+    for tool in TOOLS
 ]
 
 TOOL_HANDLERS = {
@@ -480,17 +494,20 @@ def run_agent(task: str, client: OpenAI, history: list[object] | None = None, se
     instructions, missing = skill_instructions(skills or [])
     for name in missing:
         render("output", f"Warning: skill '{name}' not found, skipping")
+    if API_MODE == "responses":
+        return run_responses_agent(task, client, instructions, history, session_id)
+    if API_MODE == "chat-completions":
+        return run_chat_agent(task, client, instructions, history, session_id)
+    raise RuntimeError("K_API_MODE must be 'responses' or 'chat-completions'")
+
+
+def run_responses_agent(task: str, client: OpenAI, instructions: str, history: list[object] | None, session_id: str | None) -> tuple[str, int, int | None, list[object]]:
     history = list(history or [])
     history.append({"role": "user", "content": task})
-    response = client.responses.create(
-        model=MODEL,
-        instructions=instructions,
-        input=list(history),
-        tools=TOOLS,
-    )
     total_tokens = 0
     context_tokens = None
     while True:
+        response = client.responses.create(model=MODEL, instructions=instructions, input=list(history), tools=TOOLS)
         output = getattr(response, "output", None)
         if not isinstance(output, list):
             raise RuntimeError("provider response is malformed")
@@ -500,27 +517,57 @@ def run_agent(task: str, client: OpenAI, history: list[object] | None = None, se
         total_tokens += (input_tokens or 0) + (output_tokens or 0)
         if input_tokens is not None:
             context_tokens = input_tokens
-
         calls = [item for item in output if item.type == "function_call"]
         if any(not all(isinstance(getattr(call, field, None), str) for field in ("name", "arguments", "call_id")) for call in calls):
             raise RuntimeError("provider response is malformed")
         if not calls:
             history.extend(output)
             return response.output_text, total_tokens, context_tokens, history
-
-        tool_outputs = [
-            dispatch_tool(call.name, call.arguments, call.call_id, session_id) for call in calls
-        ]
+        history.extend(output)
+        history.extend(dispatch_tool(call.name, call.arguments, call.call_id, session_id) for call in calls)
         for call in calls:
             render("tool", f"{call.name}({call.arguments})")
-        history.extend(output)
-        history.extend(tool_outputs)
-        response = client.responses.create(
-            model=MODEL,
-            instructions=instructions,
-            input=list(history),
-            tools=TOOLS,
+
+
+def run_chat_agent(task: str, client: OpenAI, instructions: str, history: list[object] | None, session_id: str | None) -> tuple[str, int, int | None, list[object]]:
+    history = list(history or [])
+    history.append({"role": "user", "content": task})
+    total_tokens = 0
+    context_tokens = None
+    while True:
+        response = client.chat.completions.create(
+            model=MODEL, messages=[{"role": "system", "content": instructions}, *history], tools=CHAT_TOOLS
         )
+        choices = getattr(response, "choices", None)
+        if not isinstance(choices, list) or not choices:
+            raise RuntimeError("provider response is malformed")
+        message = getattr(choices[0], "message", None)
+        calls = getattr(message, "tool_calls", None)
+        if message is None or (calls is not None and not isinstance(calls, list)):
+            raise RuntimeError("provider response is malformed")
+        usage = getattr(response, "usage", None)
+        input_tokens = getattr(usage, "prompt_tokens", None)
+        output_tokens = getattr(usage, "completion_tokens", None)
+        total_tokens += (input_tokens or 0) + (output_tokens or 0)
+        if input_tokens is not None:
+            context_tokens = input_tokens
+        calls = calls or []
+        if any(
+            not isinstance(getattr(call, "id", None), str)
+            or not all(isinstance(getattr(getattr(call, "function", None), field, None), str) for field in ("name", "arguments"))
+            for call in calls
+        ):
+            raise RuntimeError("provider response is malformed")
+        history.append({
+            "role": "assistant", "content": getattr(message, "content", None),
+            "tool_calls": [{"id": call.id, "type": "function", "function": {"name": call.function.name, "arguments": call.function.arguments}} for call in calls],
+        })
+        if not calls:
+            return message.content or "", total_tokens, context_tokens, history
+        for call in calls:
+            result = dispatch_tool(call.function.name, call.function.arguments, call.id, session_id)
+            history.append({"role": "tool", "tool_call_id": call.id, "content": result["output"]})
+            render("tool", f"{call.function.name}({call.function.arguments})")
 
 
 def main() -> None:
@@ -529,10 +576,12 @@ def main() -> None:
     parser.add_argument("--theme", choices=PALETTES, default=os.getenv("K_THEME", "light"))
     args, _ = parser.parse_known_args()
     set_theme(args.theme)
-    session = {"id": new_session_id(), "history": [], "transcript": [], "skills": []}
+    session = {"id": new_session_id(), "history": [], "transcript": [], "skills": [], "api_mode": API_MODE}
     if args.resume:
         try:
             session = load_session(args.resume)
+            if session.get("api_mode", "responses") != API_MODE:
+                raise ValueError("cannot resume a session created with a different K_API_MODE")
         except ValueError as error:
             render("output", f"Error: {error}")
     client = OpenAI()

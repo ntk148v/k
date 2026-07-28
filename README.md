@@ -28,13 +28,13 @@
 ## Features
 
 - **Minimal.** One file, stdlib, no frameworks.
-- **OpenAI Responses API.** Native function calling with self-contained request history (no `previous_response_id` dependendy — works across all OpenAI-compatible providers).
+- **OpenAI Responses and Chat Completions APIs.** Native function calling with self-contained request history; select the API your provider supports.
 - **Tool loop.** `read`, `write`, `edit`, `bash` — the four operations that cover most coding tasks.
 - **Context-mode compaction.** Large tool outputs are truncated to a useful head/tail preview; the full text is saved to disk alongside the session.
 - **Session persistence.** Every conversation is saved to `~/.k/sessions/<id>.json`. Resume any session by ID.
 - **Skills.** Load Markdown skill files from `~/.agents/skills/` to inject system instructions dynamically.
 - **Terminal UI.** Pi-inspired truecolor light/dark themes, pinned status line (showing model, tokens, git branch, cwd), colored Markdown rendering.
-- **Portable.** Works with any OpenAI-compatible provider — OpenAI, OpenRouter, xAI, local LLMs.
+- **Portable.** Works with OpenAI-compatible providers that support either Responses or Chat Completions — OpenAI, OpenRouter, xAI, local LLMs, and OpenCode Zen.
 
 ## Quick Start
 
@@ -117,10 +117,21 @@ uv run python main.py --theme dark        # dark mode
 OPENAI_MODEL_NAME=gpt-4o uv run python main.py  # custom model
 ```
 
+For OpenCode Zen, configure its OpenAI-compatible endpoint and use Chat Completions mode:
+
+```bash
+OPENAI_BASE_URL=https://opencode.ai/zen/v1 \
+OPENAI_API_KEY="$OPENCODE_API_KEY" \
+OPENAI_MODEL_NAME=<zen-model-id> \
+K_API_MODE=chat-completions \
+uv run python main.py
+```
+
 Set defaults via environment variables:
 
 - `K_THEME` — `light` (default) or `dark`
 - `OPENAI_MODEL_NAME` — model name (default: `openrouter/free`)
+- `K_API_MODE` — `responses` (default) or `chat-completions`; use the latter for OpenAI-compatible providers without a Responses endpoint, including OpenCode Zen.
 
 ### Context-mode for Large Outputs
 
@@ -412,7 +423,7 @@ def load_skills(names: list[str], base_prompt: str) -> str:
 
 ### Key Decisions
 
-- **Self-contained history vs `previous_response_id`:** `k` sends the full history array on every turn. This works with all OpenAI-compatible providers (OpenRouter, xAI, local proxies) instead of only OpenAI's first-party API.
+- **Self-contained history vs `previous_response_id`:** `k` sends the full history on every turn. It supports both Responses and Chat Completions formats, so providers only need to implement one of those APIs.
 - **No streaming:** Blocking `responses.create()` calls keep the agent loop simple. Streaming adds complexity with no functional benefit for a tool-calling agent.
 - **One file, no framework:** The entire agent is ~400 lines. There's no plugin system, no database, no async framework. Add structure only when the file becomes hard to change.
 
@@ -501,11 +512,12 @@ k/
 
 ### Environment Variables
 
-| Variable            | Default           | Description                     |
-| ------------------- | ----------------- | ------------------------------- |
-| `OPENAI_API_KEY`    | —                 | API key for the LLM provider    |
-| `OPENAI_MODEL_NAME` | `openrouter/free` | Model identifier                |
-| `K_THEME`           | `light`           | Color theme (`light` or `dark`) |
+| Variable            | Default           | Description                       |
+| ------------------- | ----------------- | --------------------------------- |
+| `OPENAI_API_KEY`    | —                 | API key for the LLM provider      |
+| `OPENAI_MODEL_NAME` | `openrouter/free` | Model identifier                  |
+| `K_API_MODE`        | `responses`       | `responses` or `chat-completions` |
+| `K_THEME`           | `light`           | Color theme (`light` or `dark`)   |
 
 ### Session Files
 
@@ -516,7 +528,7 @@ k/
 
 ### Dependencies
 
-- `openai>=2.48.0` — OpenAI Responses API (works with any OpenAI-compatible endpoint)
+- `openai>=2.48.0` — OpenAI Responses and Chat Completions APIs
 - `python-dotenv>=1.2.2` — `.env` loading
 
 No web framework, no database, no async runtime, no plugins.
