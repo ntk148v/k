@@ -229,13 +229,27 @@ class AgentTests(unittest.TestCase):
         client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=Mock(side_effect=[first, second]))))
 
         with patch.object(main, "API_MODE", "chat-completions"), patch.dict(main.TOOL_HANDLERS, {"bash": Mock(return_value="hello")}):
-            self.assertEqual(main.run_agent("say hello", client)[:3], ("Done", 21, 9))
+            result = main.run_agent("say hello", client)
+        self.assertEqual(result[:3], ("Done", 21, 9))
+        self.assertNotIn("tool_calls", result[3][-1])
 
         first_call, second_call = client.chat.completions.create.call_args_list
         self.assertEqual(first_call.kwargs["model"], main.MODEL)
         self.assertEqual(first_call.kwargs["messages"], [{"role": "system", "content": main.SYSTEM_PROMPT}, {"role": "user", "content": "say hello"}])
         self.assertEqual(second_call.kwargs["messages"][-1], {"role": "tool", "tool_call_id": "call-1", "content": "hello"})
         self.assertEqual(first_call.kwargs["tools"], main.CHAT_TOOLS)
+
+    def test_run_agent_repairs_empty_chat_tool_calls_in_saved_history(self):
+        message = SimpleNamespace(content="Hi", tool_calls=[])
+        response = SimpleNamespace(choices=[SimpleNamespace(message=message)])
+        client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=Mock(return_value=response))))
+        history = [{"role": "assistant", "content": "old reply", "tool_calls": []}]
+
+        with patch.object(main, "API_MODE", "chat-completions"):
+            main.run_agent("hello", client, history)
+
+        messages = client.chat.completions.create.call_args.kwargs["messages"]
+        self.assertEqual(messages[1], {"role": "assistant", "content": "old reply"})
 
     def test_run_agent_rejects_unknown_api_mode(self):
         with patch.object(main, "API_MODE", "unknown"):

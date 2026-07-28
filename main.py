@@ -542,6 +542,11 @@ def run_responses_agent(task: str, client: OpenAI, instructions: str, history: l
 
 def run_chat_agent(task: str, client: OpenAI, instructions: str, history: list[object] | None, session_id: str | None) -> tuple[str, int, int | None, list[object]]:
     history = list(history or [])
+    # Older k versions persisted empty tool_calls arrays on ordinary assistant
+    # messages. OpenAI-compatible providers can reject those histories.
+    for item in history:
+        if isinstance(item, dict) and item.get("role") == "assistant" and item.get("tool_calls") == []:
+            item.pop("tool_calls")
     history.append({"role": "user", "content": task})
     total_tokens = 0
     context_tokens = None
@@ -569,10 +574,13 @@ def run_chat_agent(task: str, client: OpenAI, instructions: str, history: list[o
             for call in calls
         ):
             raise RuntimeError("provider response is malformed")
-        history.append({
-            "role": "assistant", "content": getattr(message, "content", None),
-            "tool_calls": [{"id": call.id, "type": "function", "function": {"name": call.function.name, "arguments": call.function.arguments}} for call in calls],
-        })
+        assistant_message = {"role": "assistant", "content": getattr(message, "content", None)}
+        if calls:
+            assistant_message["tool_calls"] = [
+                {"id": call.id, "type": "function", "function": {"name": call.function.name, "arguments": call.function.arguments}}
+                for call in calls
+            ]
+        history.append(assistant_message)
         if not calls:
             return message.content or "", total_tokens, context_tokens, history
         for call in calls:
