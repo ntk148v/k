@@ -12,6 +12,17 @@ from pathlib import Path
 from uuid import uuid4
 
 from dotenv import load_dotenv
+
+# pydantic-core, used by the OpenAI SDK, can crash under pre-release CPython.
+# Fail before importing it so `uv run main.py` gives an actionable error.
+if __name__ == "__main__" and sys.version_info.releaselevel != "final":
+    print(
+        f"Error: k requires a stable Python release; found {sys.version.split()[0]}. "
+        "Recreate .venv with `uv python install 3.12 && uv sync`.",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+
 from openai import OpenAI
 
 load_dotenv()

@@ -164,6 +164,13 @@ class ToolTests(unittest.TestCase):
 
 
 class AgentTests(unittest.TestCase):
+    def setUp(self):
+        self.api_mode = main.API_MODE
+        main.API_MODE = "responses"
+
+    def tearDown(self):
+        main.API_MODE = self.api_mode
+
     def test_dispatch_reports_bad_json_and_unknown_tools(self):
         self.assertIn("invalid JSON", main.dispatch_tool("read", "{", "call-1")["output"])
         self.assertIn("Unknown tool", main.dispatch_tool("missing", "{}", "call-2")["output"])
@@ -221,7 +228,7 @@ class AgentTests(unittest.TestCase):
         second = SimpleNamespace(choices=[SimpleNamespace(message=second_message)], usage=SimpleNamespace(prompt_tokens=9, completion_tokens=4))
         client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=Mock(side_effect=[first, second]))))
 
-        with patch.object(main, "API_MODE", "chat-completions"), patch.object(main, "bash", return_value="hello"):
+        with patch.object(main, "API_MODE", "chat-completions"), patch.dict(main.TOOL_HANDLERS, {"bash": Mock(return_value="hello")}):
             self.assertEqual(main.run_agent("say hello", client)[:3], ("Done", 21, 9))
 
         first_call, second_call = client.chat.completions.create.call_args_list

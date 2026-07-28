@@ -39,7 +39,7 @@
 ## Quick Start
 
 ```bash
-# Prerequisites: Python ≥3.14, uv (or pip)
+# Prerequisites: Python ≥3.12, uv (or pip)
 uv sync
 cp .env.example .env   # add OPENAI_API_KEY
 uv run python main.py
