@@ -30,6 +30,10 @@ load_dotenv()
 MODEL = os.getenv("OPENAI_MODEL_NAME", "openrouter/free")
 API_MODE = os.getenv("K_API_MODE", "responses")
 
+# Ctrl+J is normally another name for Enter. Quote it so readline inserts a
+# literal newline instead; Enter (Ctrl+M) still submits the prompt.
+MULTILINE_INPUT_BINDING = r'"\C-j": "\C-v\C-j"'
+
 IMAGE_TYPES = {
     ".jpg": "image/jpeg",
     ".png": "image/png",
@@ -589,6 +593,11 @@ def run_chat_agent(task: str, client: OpenAI, instructions: str, history: list[o
             render("tool", f"{call.function.name}({call.function.arguments})")
 
 
+def configure_multiline_input() -> None:
+    """Make Ctrl+J insert a newline in an interactive readline prompt."""
+    readline.parse_and_bind(MULTILINE_INPUT_BINDING)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="k")
     parser.add_argument("--resume", metavar="ID")
@@ -609,6 +618,7 @@ def main() -> None:
             sys.stdout.write("\033[2J\033[H")
             sys.stdout.flush()
         render_pinned_status(status_line("?", None), move_cursor=True)
+        configure_multiline_input()
         while True:
             try:
                 task = input("\u276f ").strip()

@@ -85,6 +85,11 @@ class ReadlineTests(unittest.TestCase):
     def test_readline_is_loaded_for_interactive_history(self):
         self.assertIsNotNone(getattr(main, "readline", None))
 
+    def test_ctrl_j_is_bound_to_insert_a_newline(self):
+        with patch.object(main.readline, "parse_and_bind") as bind:
+            main.configure_multiline_input()
+        bind.assert_called_once_with(r'"\C-j": "\C-v\C-j"')
+
 
 class ToolTests(unittest.TestCase):
     def test_read_respects_offset_and_limit(self):
@@ -394,6 +399,18 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(mock_agent.call_count, 2)
         self.assertEqual(mock_input.call_args_list[0].args, ("\u276f ",))
         self.assertFalse(any(call.args[0] == "title" for call in render.call_args_list))
+
+    def test_main_passes_multiline_task_to_agent(self):
+        with (
+            patch("builtins.input", side_effect=["first line\nsecond line", ""]),
+            patch.object(main, "OpenAI"),
+            patch.object(main, "run_agent", return_value=("ok", 1, 1, [])) as agent,
+            patch.object(main, "render_pinned_status", return_value=True),
+            patch.object(main, "restore_terminal"),
+            patch.object(main, "render"),
+        ):
+            main.main()
+        self.assertEqual(agent.call_args.args[0], "first line\nsecond line")
 
     def test_main_renders_error_and_continues_after_agent_failure(self):
         with (

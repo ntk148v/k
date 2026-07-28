@@ -33,7 +33,7 @@
 - **Context-mode compaction.** Large tool outputs are truncated to a useful head/tail preview; the full text is saved to disk alongside the session.
 - **Session persistence.** Every conversation is saved to `~/.k/sessions/<id>.json`. Resume any session by ID.
 - **Skills.** Load Markdown skill files from `~/.agents/skills/` to inject system instructions dynamically.
-- **Terminal UI.** Pi-inspired truecolor light/dark themes, pinned status line (showing model, tokens, git branch, cwd), colored Markdown rendering.
+- **Terminal UI.** Pi-inspired truecolor light/dark themes, pinned status line (showing model, tokens, git branch, cwd), colored Markdown rendering, multiline prompts.
 - **Portable.** Works with OpenAI-compatible providers that support either Responses or Chat Completions — OpenAI, OpenRouter, xAI, local LLMs, and OpenCode Zen.
 
 ## Quick Start
@@ -55,7 +55,7 @@ uv run python main.py --resume 20260727-120000-ab12cd
 
 ### Using `k` as a Coding Agent
 
-When you run `k`, you get a prompt (`❯`). Type a coding task and the agent will reason over it, call tools (`read`, `write`, `edit`, `bash`), and return an answer.
+When you run `k`, you get a prompt (`❯`). Type a coding task and the agent will reason over it, call tools (`read`, `write`, `edit`, `bash`), and return an answer. Press **Ctrl+J** to add a line break; press Enter to submit the complete prompt.
 
 **Example session:**
 
@@ -492,6 +492,7 @@ Usage: `python minimal_agent.py "find all python files larger than 10KB"`
 | `/skills`                   | List available skills in `~/.agents/skills/` |
 | `/skill <name>`             | Load a skill for this session                |
 | `/skill clear`              | Clear all loaded skills                      |
+| Ctrl+J                      | Insert a line break in the current prompt    |
 | blank prompt / EOF (Ctrl+D) | Exit cleanly                                 |
 | Ctrl+C                      | Interrupt / exit                             |
 
