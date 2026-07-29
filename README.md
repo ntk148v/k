@@ -47,17 +47,15 @@ uv run python main.py
 
 ```bash
 # Try it instantly (no clone needed):
-uvx mini-agent-k
+uvx --from mini-agent-k k
 
-# Or install via pip/uv:
+# Or install permanently via pip/uv:
 pip install mini-agent-k
-# or
-uv tool install mini-agent-k
 # then:
-uvx mini-agent-k --help
+k
 ```
 
-> PyPI distribution: [`mini-agent-k`](https://pypi.org/project/mini-agent-k/). The command and project name remain `k`.
+> PyPI distribution: [`mini-agent-k`](https://pypi.org/project/mini-agent-k/). The executable is named `k`.
 
 Resume a session:
 
