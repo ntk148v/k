@@ -326,6 +326,14 @@ def load_session(session_id: str) -> dict:
         raise ValueError(f"cannot load session: {error}") from None
     if not isinstance(session, dict):
         raise ValueError("cannot load session: expected an object")
+    if (
+        not isinstance(session.get("id"), str)
+        or session["id"] != session_id
+        or not isinstance(session.get("history"), list)
+        or not isinstance(session.get("transcript"), list)
+        or ("skills" in session and not isinstance(session["skills"], list))
+    ):
+        raise ValueError("cannot load session: invalid session data")
     return session
 
 

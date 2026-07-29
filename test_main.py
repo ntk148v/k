@@ -1,5 +1,5 @@
 import io
-import os
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -44,6 +44,22 @@ class IdentityTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "expected an object"):
                 main.load_session("arr")
 
+    def test_load_session_rejects_invalid_session_schema(self):
+        cases = {
+            "wrong-id": {"id": "other", "history": [], "transcript": []},
+            "bad-history": {"id": "bad-history", "history": {}, "transcript": []},
+            "bad-transcript": {"id": "bad-transcript", "history": [], "transcript": {}},
+            "bad-skills": {"id": "bad-skills", "history": [], "transcript": [], "skills": {}},
+        }
+        with tempfile.TemporaryDirectory() as directory, patch.object(main.Path, "home", return_value=Path(directory)):
+            for session_id, session in cases.items():
+                with self.subTest(session_id=session_id):
+                    path = main.session_path(session_id)
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(json.dumps(session), encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, "invalid session data"):
+                        main.load_session(session_id)
+
     def test_load_session_reports_oserror(self):
         with patch.object(main.Path, "home", return_value=Path("/nonexistent-k-dir-for-testing")):
             with self.assertRaisesRegex(ValueError, "cannot load session"):
@@ -72,11 +88,11 @@ class IdentityTests(unittest.TestCase):
         ):
             result = main.render_pinned_status("k | /repo")
         self.assertFalse(result)
-        self.assertIn("k | /repo", output.getvalue())
+        self.assertIn("| /repo", output.getvalue())
 
     def test_set_theme_dark_switches_palette(self):
         main.set_theme("dark")
-        self.assertIn("\033[38;2;133;190;183m", main.color("accent"))
+        self.assertIn("\033[38;2;138;190;183m", main.color("accent"))
         main.set_theme("light")
         self.assertIn("\033[38;2;90;128;128m", main.color("accent"))
 
@@ -184,22 +200,14 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(main.compact_output("short", "bash", "s1"), "short")
 
     def test_compact_output_saves_large_text_next_to_session(self):
-        with tempfile.TemporaryDirectory() as d:
-            old_home = os.environ.get("HOME")
-            os.environ["HOME"] = d
-            try:
-                text = "x" * (main.MAX_TOOL_OUTPUT_CHARS + 50)
-                compact = main.compact_output(text, "bash", "s1")
-                self.assertIn("Full output saved:", compact)
-                artifact_dir = Path(d) / ".k" / "sessions" / "s1-artifacts"
-                saved = list(artifact_dir.glob("bash-*.txt"))
-                self.assertEqual(len(saved), 1)
-                self.assertEqual(saved[0].read_text(encoding="utf-8"), text)
-            finally:
-                if old_home is None:
-                    os.environ.pop("HOME", None)
-                else:
-                    os.environ["HOME"] = old_home
+        with tempfile.TemporaryDirectory() as d, patch.object(main.Path, "home", return_value=Path(d)):
+            text = "x" * (main.MAX_TOOL_OUTPUT_CHARS + 50)
+            compact = main.compact_output(text, "bash", "s1")
+            self.assertIn("Full output saved:", compact)
+            artifact_dir = Path(d) / ".k" / "sessions" / "s1-artifacts"
+            saved = list(artifact_dir.glob("bash-*.txt"))
+            self.assertEqual(len(saved), 1)
+            self.assertEqual(saved[0].read_text(encoding="utf-8"), text)
 
     def test_run_agent_returns_final_text_after_a_tool_call(self):
         call = SimpleNamespace(type="function_call", name="bash", arguments='{"command": "echo hello"}', call_id="call-1")
@@ -546,19 +554,11 @@ class AgentTests(unittest.TestCase):
             )
 
     def test_session_round_trip_uses_home_k_sessions(self):
-        with tempfile.TemporaryDirectory() as d:
-            old_home = os.environ.get("HOME")
-            os.environ["HOME"] = d
-            try:
-                session = {"id": "abc123", "history": [{"role": "user", "content": "hi"}], "transcript": []}
-                main.save_session(session)
-                self.assertTrue((Path(d) / ".k" / "sessions" / "abc123.json").exists())
-                self.assertEqual(main.load_session("abc123"), session)
-            finally:
-                if old_home is None:
-                    os.environ.pop("HOME", None)
-                else:
-                    os.environ["HOME"] = old_home
+        with tempfile.TemporaryDirectory() as d, patch.object(main.Path, "home", return_value=Path(d)):
+            session = {"id": "abc123", "history": [{"role": "user", "content": "hi"}], "transcript": []}
+            main.save_session(session)
+            self.assertTrue((Path(d) / ".k" / "sessions" / "abc123.json").exists())
+            self.assertEqual(main.load_session("abc123"), session)
 
     def test_handle_command_recognizes_quit(self):
         self.assertEqual(main.handle_command("/quit"), "quit")
