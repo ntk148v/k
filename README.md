@@ -45,6 +45,18 @@ cp .env.example .env   # add OPENAI_API_KEY
 uv run python main.py
 ```
 
+```bash
+# Try it instantly (no clone needed):
+uvx mini-agent-k
+
+# Or install via pip/uv:
+pip install mini-agent-k
+# or
+uv tool install mini-agent-k
+# then:
+uvx mini-agent-k --help
+```
+
 > PyPI distribution: [`mini-agent-k`](https://pypi.org/project/mini-agent-k/). The command and project name remain `k`.
 
 Resume a session:

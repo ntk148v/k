@@ -9,6 +9,9 @@ dependencies = [
     "python-dotenv>=1.2.2",
 ]
 
+[project.scripts]
+k = "main:main"
+
 [project.optional-dependencies]
 dev = ["ruff>=0.11.0"]
 
