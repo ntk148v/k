@@ -1,4 +1,4 @@
-name: Release
+name: Publish mini-agent-k
 
 on:
   push:

@@ -1,5 +1,5 @@
 [project]
-name = "k"
+name = "mini-agent-k"
 version = "0.1.0"
 description = "A minimal coding agent"
 readme = "README.md"

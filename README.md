@@ -45,6 +45,8 @@ cp .env.example .env   # add OPENAI_API_KEY
 uv run python main.py
 ```
 
+> PyPI distribution: [`mini-agent-k`](https://pypi.org/project/mini-agent-k/). The command and project name remain `k`.
+
 Resume a session:
 
 ```bash
