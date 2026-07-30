@@ -93,23 +93,37 @@ def edit(path: str, oldText: str, newText: str) -> str:
 
 def is_dangerous_bash(command: str) -> bool:
     try:
-        tokens = shlex.split(command)
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        tokens = list(lexer)
     except ValueError:
         return False
-    if not tokens:
+
+    def is_dangerous_simple(simple: list[str]) -> bool:
+        if not simple:
+            return False
+        end = simple.index("--") if "--" in simple else len(simple)
+        options = [token for token in simple[1:end] if token.startswith("-")]
+        short_options = "".join(token[1:] for token in options if not token.startswith("--"))
+        if simple[0] == "rm":
+            return ("r" in short_options or "R" in short_options or "--recursive" in options) and ("f" in short_options or "--force" in options)
+        if simple[:2] == ["git", "reset"]:
+            return "--hard" in options
+        if simple[:2] == ["git", "clean"]:
+            return "f" in short_options or "--force" in options
+        if simple[:2] == ["git", "push"]:
+            return "f" in short_options or "--force" in options or "--force-with-lease" in options
         return False
-    if tokens[0] == "rm":
-        opts = "".join(t for t in tokens if t.startswith("-"))
-        return "r" in opts and "f" in opts
-    if tokens[0] == "git" and len(tokens) >= 3:
-        if tokens[1] == "reset" and tokens[2] == "--hard":
-            return True
-        if tokens[1] == "clean":
-            opts = "".join(t for t in tokens if t.startswith("-"))
-            return "f" in opts
-        if tokens[1] == "push":
-            opts = "".join(t for t in tokens if t.startswith("-"))
-            return "f" in opts or "--force" in tokens or "--force-with-lease" in tokens
+
+    simple: list[str] = []
+    for token in [*tokens, ";"]:
+        if token and set(token) <= set(";&|()"):
+            if is_dangerous_simple(simple):
+                return True
+            simple = []
+        else:
+            simple.append(token)
     return False
 
 
@@ -379,6 +393,8 @@ def load_session(session_id: str) -> dict:
         or not isinstance(session.get("history"), list)
         or not isinstance(session.get("transcript"), list)
         or ("skills" in session and not isinstance(session["skills"], list))
+        or any(field in session and not isinstance(session[field], str) for field in ("model", "title", "cwd", "created_at", "updated_at"))
+        or ("undo" in session and session["undo"] is not None and not isinstance(session["undo"], dict))
     ):
         raise ValueError("cannot load session: invalid session data")
     return ensure_session_defaults(session)
@@ -398,24 +414,22 @@ MAX_SESSION_LISTING = 20
 
 
 def list_sessions(limit: int = MAX_SESSION_LISTING) -> list[dict[str, str]]:
-    seen = []
-    for path in sorted(sessions_dir().glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
-        if len(seen) >= limit:
-            break
+    summaries = []
+    for path in sessions_dir().glob("*.json"):
         try:
             session = load_session(path.stem)
         except (ValueError, OSError):
             continue
-        seen.append(
+        summaries.append(
             {
                 "id": session["id"],
-                "title": session.get("title", "") or "(untitled)",
-                "cwd": session.get("cwd", ""),
-                "updated_at": session.get("updated_at", ""),
-                "model": session.get("model", MODEL),
+                "title": session["title"] or "(untitled)",
+                "cwd": session["cwd"],
+                "updated_at": session["updated_at"],
+                "model": session["model"],
             }
         )
-    return seen
+    return sorted(summaries, key=lambda summary: summary["updated_at"], reverse=True)[:limit]
 
 
 def format_session_list(sessions: list[dict[str, str]]) -> str:
@@ -476,8 +490,9 @@ def dispatch_tool(
             "call_id": call_id,
             "output": f"Error: invalid JSON in arguments: {e}",
         }
-    if name == "bash" and confirm_dangerous is not None and is_dangerous_bash(args.get("command", "")):
-        if not confirm_dangerous(args["command"]):
+    command = args.get("command") if isinstance(args, dict) else None
+    if name == "bash" and isinstance(command, str) and is_dangerous_bash(command):
+        if confirm_dangerous is None or not confirm_dangerous(command):
             return {
                 "type": "function_call_output",
                 "call_id": call_id,

@@ -61,6 +61,25 @@ class IdentityTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "invalid session data"):
                         main.load_session(session_id)
 
+    def test_load_session_rejects_present_optional_metadata_with_invalid_types(self):
+        invalid_metadata = {
+            "model": None,
+            "title": 1,
+            "cwd": [],
+            "created_at": {},
+            "updated_at": False,
+            "undo": [],
+        }
+        with tempfile.TemporaryDirectory() as directory, patch.object(main.Path, "home", return_value=Path(directory)):
+            for field, value in invalid_metadata.items():
+                with self.subTest(field=field):
+                    session = {"id": field, "history": [], "transcript": [], field: value}
+                    path = main.session_path(field)
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(json.dumps(session), encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, "invalid session data"):
+                        main.load_session(field)
+
     def test_load_session_reports_oserror(self):
         with patch.object(main.Path, "home", return_value=Path("/nonexistent-k-dir-for-testing")):
             with self.assertRaisesRegex(ValueError, "cannot load session"):
@@ -200,13 +219,15 @@ class IdentityTests(unittest.TestCase):
 
     def test_list_sessions_is_newest_first_and_skips_invalid_files(self):
         with tempfile.TemporaryDirectory() as d, patch.object(main.Path, "home", return_value=Path(d)):
-            early = {"id": "early", "history": [], "transcript": []}
-            main.save_session(early)
-            later = {"id": "later", "history": [], "transcript": []}
-            main.save_session(later)
-            # Touch the later file to be newer
-            (main.session_path("later")).touch()
-            # Write an invalid JSON file
+            early = {"id": "early", "history": [], "transcript": [], "updated_at": "2026-07-30T10:00:00+00:00"}
+            later = {"id": "later", "history": [], "transcript": [], "updated_at": "2026-07-30T12:00:00+00:00"}
+            for session in (later, early):
+                path = main.session_path(session["id"])
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(session), encoding="utf-8")
+            # Make the older persisted session newer on disk.
+            (main.session_path("early")).touch()
+            # Write an invalid JSON file.
             (main.session_path("bad")).write_text("not json", encoding="utf-8")
             sessions = main.list_sessions()
         self.assertEqual([s["id"] for s in sessions], ["later", "early"])
@@ -316,14 +337,36 @@ class ToolTests(unittest.TestCase):
     def test_is_dangerous_bash_limits_the_protected_set(self):
         for command in ("rm -rf build", "rm -fr build", "git reset --hard", "git clean -fd", "git push origin main --force"):
             self.assertTrue(main.is_dangerous_bash(command))
-        for command in ("rm file.txt", "git reset --soft HEAD~1", "git push origin main"):
+        for command in (
+            "rm file.txt",
+            "rm --preserve-root --one-file-system build",
+            "git reset --soft HEAD~1",
+            "git push origin main",
+            "git push --follow-tags",
+        ):
             self.assertFalse(main.is_dangerous_bash(command))
 
+    def test_is_dangerous_bash_recognizes_protected_commands_in_shell_compounds(self):
+        for command in ("cd repo && rm -rf build", "cd repo && git reset --hard", "echo safe; git clean -fd", "true || git push --force"):
+            with self.subTest(command=command):
+                self.assertTrue(main.is_dangerous_bash(command))
+        for command in ("echo 'rm -rf build'", "printf '%s' 'git reset --hard'", "echo rm -rf build && true"):
+            with self.subTest(command=command):
+                self.assertFalse(main.is_dangerous_bash(command))
+
     def test_dispatch_requires_confirmation_before_dangerous_bash(self):
-        with patch.object(main, "bash") as bash:
-            result = main.dispatch_tool("bash", '{"command":"rm -rf build"}', "call-1", confirm_dangerous=lambda _: False)
+        handler = Mock()
+        with patch.dict(main.TOOL_HANDLERS, {"bash": handler}):
+            result = main.dispatch_tool("bash", '{"command":"cd repo && rm -rf build"}', "call-1", confirm_dangerous=lambda _: False)
         self.assertIn("rejected", result["output"])
-        bash.assert_not_called()
+        handler.assert_not_called()
+
+    def test_dispatch_rejects_dangerous_bash_without_a_confirmation_callback(self):
+        handler = Mock()
+        with patch.dict(main.TOOL_HANDLERS, {"bash": handler}):
+            result = main.dispatch_tool("bash", '{"command":"git reset --hard"}', "call-1")
+        self.assertIn("rejected", result["output"])
+        handler.assert_not_called()
 
     def test_dispatch_runs_dangerous_bash_after_confirmation(self):
         handler = Mock(return_value="done")
