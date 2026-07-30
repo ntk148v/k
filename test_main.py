@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -68,6 +69,72 @@ class IdentityTests(unittest.TestCase):
     def test_git_branch_returns_none_on_oserror(self):
         with patch.object(main.subprocess, "run", side_effect=OSError("no git")):
             self.assertIsNone(main.git_branch())
+
+    def git(self, root: Path, *args: str) -> str:
+        result = main.subprocess.run(
+            ["git", *args],
+            cwd=root,
+            text=True,
+            stdout=main.subprocess.PIPE,
+            stderr=main.subprocess.PIPE,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout
+
+    def init_git_repo(self, directory: str) -> Path:
+        root = Path(directory)
+        self.git(root, "init", "-q")
+        self.git(root, "config", "user.email", "k@example.test")
+        self.git(root, "config", "user.name", "k")
+        (root / "note.txt").write_text("before\n", encoding="utf-8")
+        self.git(root, "add", "note.txt")
+        self.git(root, "commit", "-qm", "init")
+        return root
+
+    def test_undo_checkpoint_is_unavailable_when_worktree_is_dirty(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.init_git_repo(directory)
+            (root / "note.txt").write_text("changed\n", encoding="utf-8")
+            previous = Path.cwd()
+            try:
+                os.chdir(root)
+                self.assertIsNone(main.begin_undo_checkpoint())
+            finally:
+                os.chdir(previous)
+
+    def test_apply_undo_reverses_tracked_edit_and_removes_new_untracked_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.init_git_repo(directory)
+            previous = Path.cwd()
+            try:
+                os.chdir(root)
+                checkpoint = main.begin_undo_checkpoint()
+                (root / "note.txt").write_text("after\n", encoding="utf-8")
+                (root / "new.txt").write_text("new\n", encoding="utf-8")
+                record = main.finish_undo_checkpoint(checkpoint)
+                self.assertEqual(main.apply_undo(record), "Undo complete.")
+                self.assertEqual((root / "note.txt").read_text(encoding="utf-8"), "before\n")
+                self.assertFalse((root / "new.txt").exists())
+                self.assertEqual(self.git(root, "status", "--porcelain"), "")
+            finally:
+                os.chdir(previous)
+
+    def test_apply_undo_refuses_when_worktree_changed_after_turn(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.init_git_repo(directory)
+            previous = Path.cwd()
+            try:
+                os.chdir(root)
+                checkpoint = main.begin_undo_checkpoint()
+                (root / "note.txt").write_text("after\n", encoding="utf-8")
+                record = main.finish_undo_checkpoint(checkpoint)
+                (root / "later.txt").write_text("later\n", encoding="utf-8")
+                self.assertIn("worktree changed", main.apply_undo(record))
+                self.assertEqual((root / "note.txt").read_text(encoding="utf-8"), "after\n")
+                self.assertEqual((root / "later.txt").read_text(encoding="utf-8"), "later\n")
+            finally:
+                os.chdir(previous)
 
     def test_format_markdown_handles_empty_string(self):
         self.assertEqual(main.format_markdown(""), "")

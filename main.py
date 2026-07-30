@@ -490,6 +490,95 @@ def dispatch_tool(name: str, arguments: str, call_id: str, session_id: str | Non
     }
 
 
+def _git(args: list[str], data: str | None = None) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=Path.cwd(),
+            text=True,
+            input=data,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError:
+        return None
+    return result.stdout if result.returncode == 0 else None
+
+
+def _git_root() -> str | None:
+    root = _git(["rev-parse", "--show-toplevel"])
+    return str(Path(root.strip()).resolve()) if root else None
+
+
+def begin_undo_checkpoint() -> dict | None:
+    if _git(["status", "--porcelain"]) != "":
+        return None
+    root = _git_root()
+    patch = _git(["diff", "--binary", "HEAD"])
+    untracked = _git(["ls-files", "--others", "--exclude-standard"])
+    if root is None or patch is None or untracked is None:
+        return None
+    return {"root": root, "patch": patch, "untracked": sorted(set(untracked.splitlines()))}
+
+
+def finish_undo_checkpoint(checkpoint: dict | None) -> dict | None:
+    if not isinstance(checkpoint, dict):
+        return None
+    root = checkpoint.get("root")
+    baseline_patch = checkpoint.get("patch")
+    baseline_untracked = checkpoint.get("untracked")
+    if not isinstance(root, str) or not isinstance(baseline_patch, str) or not isinstance(baseline_untracked, list):
+        return None
+    if _git_root() != root:
+        return None
+    patch = _git(["diff", "--binary", "HEAD"])
+    untracked = _git(["ls-files", "--others", "--exclude-standard"])
+    if patch is None or untracked is None:
+        return None
+    post_untracked = set(untracked.splitlines())
+    if patch == baseline_patch and post_untracked == set(baseline_untracked):
+        return None
+    return {"root": root, "patch": patch, "untracked": sorted(post_untracked - set(baseline_untracked))}
+
+
+def apply_undo(record: dict | None) -> str:
+    if not isinstance(record, dict):
+        return "Undo unavailable: no checkpoint."
+    root = record.get("root")
+    patch = record.get("patch")
+    untracked = record.get("untracked")
+    if not isinstance(root, str) or not isinstance(patch, str) or not isinstance(untracked, list) or not all(isinstance(path, str) for path in untracked):
+        return "Undo unavailable: no checkpoint."
+    if _git_root() != root:
+        return "Undo unavailable: checkpoint is for a different repository."
+    current_patch = _git(["diff", "--binary", "HEAD"])
+    current_untracked = _git(["ls-files", "--others", "--exclude-standard"])
+    if current_patch is None or current_untracked is None:
+        return "Undo unavailable: no checkpoint."
+    if current_patch != patch or set(current_untracked.splitlines()) != set(untracked):
+        return "Undo refused: worktree changed since the turn."
+    if _git(["apply", "--reverse", "--binary"], patch) is None:
+        return "Undo failed: patch could not be applied."
+    root_path = Path(root).resolve()
+    for name in untracked:
+        path = root_path / name
+        try:
+            path.resolve().relative_to(root_path)
+        except ValueError:
+            continue
+        try:
+            if path.is_file() or path.is_symlink():
+                path.unlink()
+            parent = path.parent
+            while parent != root_path:
+                parent.rmdir()
+                parent = parent.parent
+        except OSError:
+            continue
+    return "Undo complete."
+
+
 def git_branch() -> str | None:
     try:
         result = subprocess.run(
