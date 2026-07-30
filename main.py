@@ -428,7 +428,7 @@ Guidelines:
 - Show file paths clearly when working with files"""
 
 
-def dispatch_tool(name: str, arguments: str, call_id: str, session_id: str | None = None) -> dict:
+def dispatch_tool(name: str, arguments: str, call_id: str, session_id: str | None = None, *, confirm_dangerous: object = None, on_activity: object = None) -> dict:
     try:
         args = json.loads(arguments)
     except json.JSONDecodeError as e:
@@ -476,14 +476,16 @@ def git_branch() -> str | None:
     return result.stdout.strip() or None
 
 
-def status_line(total_tokens: int | str, context_tokens: int | None) -> str:
+def status_line(total_tokens: int | str, context_tokens: int | None, model: str = MODEL, activity: str = "") -> str:
     parts = ["k", str(Path.cwd())]
     if branch := git_branch():
         parts.append(branch)
     context = context_tokens if context_tokens is not None else "?"
     parts.extend(
-        [f"model: {MODEL}", f"tokens: {total_tokens}", f"context: {context}"]
+        [f"model: {model}", f"tokens: {total_tokens}", f"context: {context}"]
     )
+    if activity:
+        parts.append(activity)
     return " | ".join(parts)
 
 
@@ -565,24 +567,26 @@ def handle_command(text: str) -> str | None:
     return f"Unknown command: {text.split()[0]}"
 
 
-def run_agent(task: str, client: OpenAI, history: list[object] | None = None, session_id: str | None = None, skills: list[str] | None = None) -> tuple[str, int, int | None, list[object]]:
+def run_agent(task: str, client: OpenAI, history: list[object] | None = None, session_id: str | None = None, skills: list[str] | None = None, *, model: str = MODEL, confirm_dangerous: object = None, on_activity: object = None) -> tuple[str, int, int | None, list[object]]:
     instructions, missing = skill_instructions(skills or [])
     for name in missing:
         render("output", f"Warning: skill '{name}' not found, skipping")
     if API_MODE == "responses":
-        return run_responses_agent(task, client, instructions, history, session_id)
+        return run_responses_agent(task, client, instructions, history, session_id, model=model, confirm_dangerous=confirm_dangerous, on_activity=on_activity)
     if API_MODE == "chat-completions":
-        return run_chat_agent(task, client, instructions, history, session_id)
+        return run_chat_agent(task, client, instructions, history, session_id, model=model, confirm_dangerous=confirm_dangerous, on_activity=on_activity)
     raise RuntimeError("K_API_MODE must be 'responses' or 'chat-completions'")
 
 
-def run_responses_agent(task: str, client: OpenAI, instructions: str, history: list[object] | None, session_id: str | None) -> tuple[str, int, int | None, list[object]]:
+def run_responses_agent(task: str, client: OpenAI, instructions: str, history: list[object] | None, session_id: str | None, *, model: str = MODEL, confirm_dangerous: object = None, on_activity: object = None) -> tuple[str, int, int | None, list[object]]:
     history = list(history or [])
     history.append({"role": "user", "content": task})
     total_tokens = 0
     context_tokens = None
     while True:
-        response = client.responses.create(model=MODEL, instructions=instructions, input=list(history), tools=TOOLS)
+        if on_activity:
+            on_activity("thinking")
+        response = client.responses.create(model=model, instructions=instructions, input=list(history), tools=TOOLS)
         output = getattr(response, "output", None)
         if not isinstance(output, list):
             raise RuntimeError("provider response is malformed")
@@ -599,12 +603,15 @@ def run_responses_agent(task: str, client: OpenAI, instructions: str, history: l
             history.extend(output)
             return response.output_text, total_tokens, context_tokens, history
         history.extend(output)
-        history.extend(dispatch_tool(call.name, call.arguments, call.call_id, session_id) for call in calls)
+        for call in calls:
+            if on_activity:
+                on_activity(call.name)
+        history.extend(dispatch_tool(call.name, call.arguments, call.call_id, session_id, confirm_dangerous=confirm_dangerous, on_activity=on_activity) for call in calls)
         for call in calls:
             render("tool", f"{call.name}({call.arguments})")
 
 
-def run_chat_agent(task: str, client: OpenAI, instructions: str, history: list[object] | None, session_id: str | None) -> tuple[str, int, int | None, list[object]]:
+def run_chat_agent(task: str, client: OpenAI, instructions: str, history: list[object] | None, session_id: str | None, *, model: str = MODEL, confirm_dangerous: object = None, on_activity: object = None) -> tuple[str, int, int | None, list[object]]:
     history = list(history or [])
     # Older k versions persisted empty tool_calls arrays on ordinary assistant
     # messages. OpenAI-compatible providers can reject those histories.
@@ -615,8 +622,10 @@ def run_chat_agent(task: str, client: OpenAI, instructions: str, history: list[o
     total_tokens = 0
     context_tokens = None
     while True:
+        if on_activity:
+            on_activity("thinking")
         response = client.chat.completions.create(
-            model=MODEL, messages=[{"role": "system", "content": instructions}, *history], tools=CHAT_TOOLS
+            model=model, messages=[{"role": "system", "content": instructions}, *history], tools=CHAT_TOOLS
         )
         choices = getattr(response, "choices", None)
         if not isinstance(choices, list) or not choices:
@@ -648,7 +657,9 @@ def run_chat_agent(task: str, client: OpenAI, instructions: str, history: list[o
         if not calls:
             return message.content or "", total_tokens, context_tokens, history
         for call in calls:
-            result = dispatch_tool(call.function.name, call.function.arguments, call.id, session_id)
+            if on_activity:
+                on_activity(call.function.name)
+            result = dispatch_tool(call.function.name, call.function.arguments, call.id, session_id, confirm_dangerous=confirm_dangerous, on_activity=on_activity)
             history.append({"role": "tool", "tool_call_id": call.id, "content": result["output"]})
             render("tool", f"{call.function.name}({call.function.arguments})")
 

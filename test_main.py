@@ -240,6 +240,35 @@ class AgentTests(unittest.TestCase):
         self.assertIn("invalid JSON", main.dispatch_tool("read", "{", "call-1")["output"])
         self.assertIn("Unknown tool", main.dispatch_tool("missing", "{}", "call-2")["output"])
 
+    def test_run_agent_uses_explicit_session_model_for_responses(self):
+        call = SimpleNamespace(type="function_call", name="bash", arguments='{"command": "echo hello"}', call_id="call-1")
+        first = SimpleNamespace(
+            id="resp-1", output=[call], output_text="",
+            usage=SimpleNamespace(input_tokens=5, output_tokens=3),
+        )
+        second = SimpleNamespace(
+            id="resp-2", output=[], output_text="Done",
+            usage=SimpleNamespace(input_tokens=9, output_tokens=4),
+        )
+        client = SimpleNamespace(responses=SimpleNamespace(create=Mock(side_effect=[first, second])))
+
+        with patch.object(main, "bash", return_value="hello"):
+            main.run_agent("say hello", client, model="provider/model-x")
+
+        first_call = client.responses.create.call_args_list[0]
+        self.assertEqual(first_call.kwargs["model"], "provider/model-x")
+
+    def test_run_agent_uses_explicit_session_model_for_chat(self):
+        message = SimpleNamespace(content="Done", tool_calls=[])
+        response = SimpleNamespace(choices=[SimpleNamespace(message=message)], usage=SimpleNamespace(prompt_tokens=5, completion_tokens=3))
+        client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=Mock(return_value=response))))
+
+        with patch.object(main, "API_MODE", "chat-completions"):
+            main.run_agent("hello", client, model="provider/model-y")
+
+        first_call = client.chat.completions.create.call_args_list[0]
+        self.assertEqual(first_call.kwargs["model"], "provider/model-y")
+
     def test_compact_output_keeps_short_text(self):
         self.assertEqual(main.compact_output("short", "bash", "s1"), "short")
 
@@ -495,6 +524,11 @@ class AgentTests(unittest.TestCase):
             line = main.status_line(0, None)
         self.assertNotIn("branch:", line)
         self.assertIn("context: ?", line)
+
+    def test_status_line_uses_passed_model_and_activity(self):
+        line = main.status_line(21, 9, "provider/model-x", "thinking")
+        self.assertIn("model: provider/model-x", line)
+        self.assertIn("thinking", line)
 
     def test_main_uses_pinned_status_and_the_new_prompt(self):
         with (
