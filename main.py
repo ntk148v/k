@@ -18,8 +18,7 @@ from dotenv import load_dotenv
 # Fail before importing it so `uv run main.py` gives an actionable error.
 if __name__ == "__main__" and sys.version_info.releaselevel != "final":
     print(
-        f"Error: k requires a stable Python release; found {sys.version.split()[0]}. "
-        "Recreate .venv with `uv python install 3.12 && uv sync`.",
+        f"Error: k requires a stable Python release; found {sys.version.split()[0]}. Recreate .venv with `uv python install 3.12 && uv sync`.",
         file=sys.stderr,
     )
     raise SystemExit(1)
@@ -90,6 +89,7 @@ def edit(path: str, oldText: str, newText: str) -> str:
         return f"Edited {target}"
     except (OSError, ValueError) as error:
         return f"Error: cannot edit {path}: {error}"
+
 
 def is_dangerous_bash(command: str) -> bool:
     try:
@@ -264,14 +264,26 @@ def skill_instructions(names: list[str]) -> tuple[str, list[str]]:
 RESET = "\033[0m"
 PALETTES = {
     "light": {
-        "text": "#1f2328", "accent": "#5a8080", "muted": "#6c6c6c",
-        "tool": "#547da7", "error": "#aa5555", "heading": "#9a7326",
-        "code": "#5a8080", "code_block": "#588458", "list": "#588458",
+        "text": "#1f2328",
+        "accent": "#5a8080",
+        "muted": "#6c6c6c",
+        "tool": "#547da7",
+        "error": "#aa5555",
+        "heading": "#9a7326",
+        "code": "#5a8080",
+        "code_block": "#588458",
+        "list": "#588458",
     },
     "dark": {
-        "text": "#d4d4d4", "accent": "#8abeb7", "muted": "#808080",
-        "tool": "#5f87ff", "error": "#cc6666", "heading": "#f0c674",
-        "code": "#8abeb7", "code_block": "#b5bd68", "list": "#8abeb7",
+        "text": "#d4d4d4",
+        "accent": "#8abeb7",
+        "muted": "#808080",
+        "tool": "#5f87ff",
+        "error": "#cc6666",
+        "heading": "#f0c674",
+        "code": "#8abeb7",
+        "code_block": "#b5bd68",
+        "list": "#8abeb7",
     },
 }
 COLORS: dict[str, str] = {}
@@ -319,6 +331,7 @@ def format_markdown(text: str) -> str:
         else:
             result.append(f"{color('text')}{_inline(line)}{RESET}")
     return "\n".join(result)
+
 
 def k_dir() -> Path:
     return Path.home() / ".k"
@@ -393,13 +406,15 @@ def list_sessions(limit: int = MAX_SESSION_LISTING) -> list[dict[str, str]]:
             session = load_session(path.stem)
         except (ValueError, OSError):
             continue
-        seen.append({
-            "id": session["id"],
-            "title": session.get("title", "") or "(untitled)",
-            "cwd": session.get("cwd", ""),
-            "updated_at": session.get("updated_at", ""),
-            "model": session.get("model", MODEL),
-        })
+        seen.append(
+            {
+                "id": session["id"],
+                "title": session.get("title", "") or "(untitled)",
+                "cwd": session.get("cwd", ""),
+                "updated_at": session.get("updated_at", ""),
+                "model": session.get("model", MODEL),
+            }
+        )
     return seen
 
 
@@ -450,7 +465,9 @@ Guidelines:
 - Show file paths clearly when working with files"""
 
 
-def dispatch_tool(name: str, arguments: str, call_id: str, session_id: str | None = None, *, confirm_dangerous: object = None, on_activity: object = None) -> dict:
+def dispatch_tool(
+    name: str, arguments: str, call_id: str, session_id: str | None = None, *, confirm_dangerous: object = None, on_activity: object = None
+) -> dict:
     try:
         args = json.loads(arguments)
     except json.JSONDecodeError as e:
@@ -550,7 +567,13 @@ def apply_undo(record: dict | None) -> str:
     patch = record.get("patch")
     index_patch = record.get("index_patch")
     untracked = record.get("untracked")
-    if not isinstance(root, str) or not isinstance(patch, str) or not isinstance(index_patch, str) or not isinstance(untracked, list) or not all(isinstance(path, str) for path in untracked):
+    if (
+        not isinstance(root, str)
+        or not isinstance(patch, str)
+        or not isinstance(index_patch, str)
+        or not isinstance(untracked, list)
+        or not all(isinstance(path, str) for path in untracked)
+    ):
         return "Undo unavailable: no checkpoint."
     if _git_root() != root:
         return "Undo unavailable: checkpoint is for a different repository."
@@ -604,9 +627,7 @@ def status_line(total_tokens: int | str, context_tokens: int | None, model: str 
     if branch := git_branch():
         parts.append(branch)
     context = context_tokens if context_tokens is not None else "?"
-    parts.extend(
-        [f"model: {model}", f"tokens: {total_tokens}", f"context: {context}"]
-    )
+    parts.extend([f"model: {model}", f"tokens: {total_tokens}", f"context: {context}"])
     if activity:
         parts.append(activity)
     return " | ".join(parts)
@@ -626,7 +647,10 @@ def render(kind: str, text: str) -> None:
             sys.stdout.write(f"{text}\n")
     elif kind == "status":
         if is_tty:
-            lines = [f"\033[7m{color('accent')} k {RESET}{color('muted')}{line[1:]}{RESET}" if line.startswith("k") else f"{color('muted')}{line}{RESET}" for line in text.splitlines()]
+            lines = [
+                f"\033[7m{color('accent')} k {RESET}{color('muted')}{line[1:]}{RESET}" if line.startswith("k") else f"{color('muted')}{line}{RESET}"
+                for line in text.splitlines()
+            ]
             sys.stdout.write("\n".join(lines) + "\n")
         else:
             sys.stdout.write(f"{text}\n")
@@ -690,7 +714,17 @@ def handle_command(text: str) -> str | None:
     return f"Unknown command: {text.split()[0]}"
 
 
-def run_agent(task: str, client: OpenAI, history: list[object] | None = None, session_id: str | None = None, skills: list[str] | None = None, *, model: str = MODEL, confirm_dangerous: object = None, on_activity: object = None) -> tuple[str, int, int | None, list[object]]:
+def run_agent(
+    task: str,
+    client: OpenAI,
+    history: list[object] | None = None,
+    session_id: str | None = None,
+    skills: list[str] | None = None,
+    *,
+    model: str = MODEL,
+    confirm_dangerous: object = None,
+    on_activity: object = None,
+) -> tuple[str, int, int | None, list[object]]:
     instructions, missing = skill_instructions(skills or [])
     for name in missing:
         render("output", f"Warning: skill '{name}' not found, skipping")
@@ -701,7 +735,17 @@ def run_agent(task: str, client: OpenAI, history: list[object] | None = None, se
     raise RuntimeError("K_API_MODE must be 'responses' or 'chat-completions'")
 
 
-def run_responses_agent(task: str, client: OpenAI, instructions: str, history: list[object] | None, session_id: str | None, *, model: str = MODEL, confirm_dangerous: object = None, on_activity: object = None) -> tuple[str, int, int | None, list[object]]:
+def run_responses_agent(
+    task: str,
+    client: OpenAI,
+    instructions: str,
+    history: list[object] | None,
+    session_id: str | None,
+    *,
+    model: str = MODEL,
+    confirm_dangerous: object = None,
+    on_activity: object = None,
+) -> tuple[str, int, int | None, list[object]]:
     history = list(history or [])
     history.append({"role": "user", "content": task})
     total_tokens = 0
@@ -729,12 +773,24 @@ def run_responses_agent(task: str, client: OpenAI, instructions: str, history: l
         for call in calls:
             if on_activity:
                 on_activity(call.name)
-        history.extend(dispatch_tool(call.name, call.arguments, call.call_id, session_id, confirm_dangerous=confirm_dangerous, on_activity=on_activity) for call in calls)
+        history.extend(
+            dispatch_tool(call.name, call.arguments, call.call_id, session_id, confirm_dangerous=confirm_dangerous, on_activity=on_activity) for call in calls
+        )
         for call in calls:
             render("tool", f"{call.name}({call.arguments})")
 
 
-def run_chat_agent(task: str, client: OpenAI, instructions: str, history: list[object] | None, session_id: str | None, *, model: str = MODEL, confirm_dangerous: object = None, on_activity: object = None) -> tuple[str, int, int | None, list[object]]:
+def run_chat_agent(
+    task: str,
+    client: OpenAI,
+    instructions: str,
+    history: list[object] | None,
+    session_id: str | None,
+    *,
+    model: str = MODEL,
+    confirm_dangerous: object = None,
+    on_activity: object = None,
+) -> tuple[str, int, int | None, list[object]]:
     history = list(history or [])
     # Older k versions persisted empty tool_calls arrays on ordinary assistant
     # messages. OpenAI-compatible providers can reject those histories.
@@ -747,9 +803,7 @@ def run_chat_agent(task: str, client: OpenAI, instructions: str, history: list[o
     while True:
         if on_activity:
             on_activity("thinking")
-        response = client.chat.completions.create(
-            model=model, messages=[{"role": "system", "content": instructions}, *history], tools=CHAT_TOOLS
-        )
+        response = client.chat.completions.create(model=model, messages=[{"role": "system", "content": instructions}, *history], tools=CHAT_TOOLS)
         choices = getattr(response, "choices", None)
         if not isinstance(choices, list) or not choices:
             raise RuntimeError("provider response is malformed")
@@ -773,8 +827,7 @@ def run_chat_agent(task: str, client: OpenAI, instructions: str, history: list[o
         assistant_message = {"role": "assistant", "content": getattr(message, "content", None)}
         if calls:
             assistant_message["tool_calls"] = [
-                {"id": call.id, "type": "function", "function": {"name": call.function.name, "arguments": call.function.arguments}}
-                for call in calls
+                {"id": call.id, "type": "function", "function": {"name": call.function.name, "arguments": call.function.arguments}} for call in calls
             ]
         history.append(assistant_message)
         if not calls:
@@ -782,7 +835,9 @@ def run_chat_agent(task: str, client: OpenAI, instructions: str, history: list[o
         for call in calls:
             if on_activity:
                 on_activity(call.function.name)
-            result = dispatch_tool(call.function.name, call.function.arguments, call.id, session_id, confirm_dangerous=confirm_dangerous, on_activity=on_activity)
+            result = dispatch_tool(
+                call.function.name, call.function.arguments, call.id, session_id, confirm_dangerous=confirm_dangerous, on_activity=on_activity
+            )
             history.append({"role": "tool", "tool_call_id": call.id, "content": result["output"]})
             render("tool", f"{call.function.name}({call.function.arguments})")
 

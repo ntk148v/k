@@ -156,9 +156,7 @@ class IdentityTests(unittest.TestCase):
         self.assertEqual(main.format_markdown(""), "")
 
     def test_restore_terminal_does_nothing_when_not_a_tty(self):
-        with patch("sys.stdout", new_callable=io.StringIO) as output, patch.object(
-            output, "isatty", return_value=False
-        ):
+        with patch("sys.stdout", new_callable=io.StringIO) as output, patch.object(output, "isatty", return_value=False):
             main.restore_terminal()
         self.assertEqual(output.getvalue(), "")
 
@@ -178,7 +176,6 @@ class IdentityTests(unittest.TestCase):
         self.assertIn("\033[38;2;138;190;183m", main.color("accent"))
         main.set_theme("light")
         self.assertIn("\033[38;2;90;128;128m", main.color("accent"))
-
 
     def test_load_session_adds_defaults_for_old_valid_session(self):
         with tempfile.TemporaryDirectory() as d, patch.object(main.Path, "home", return_value=Path(d)):
@@ -216,11 +213,17 @@ class IdentityTests(unittest.TestCase):
 
     def test_format_session_list_is_compact_and_handles_empty(self):
         self.assertEqual(main.format_session_list([]), "No saved sessions.")
-        formatted = main.format_session_list([{
-            "id": "abc123", "title": "Fix parser",
-            "cwd": "/repo", "updated_at": "2026-07-30T12:00:00+00:00",
-            "model": "small",
-        }])
+        formatted = main.format_session_list(
+            [
+                {
+                    "id": "abc123",
+                    "title": "Fix parser",
+                    "cwd": "/repo",
+                    "updated_at": "2026-07-30T12:00:00+00:00",
+                    "model": "small",
+                }
+            ]
+        )
         self.assertIn("abc123", formatted)
 
 
@@ -309,6 +312,7 @@ class ToolTests(unittest.TestCase):
         with patch.dict(main.TOOL_HANDLERS, {"list_tool": lambda **kw: [{"type": "input_image", "image_url": "data:img"}]}):
             result = main.dispatch_tool("list_tool", "{}", "call-1")
         self.assertEqual(result["output"], [{"type": "input_image", "image_url": "data:img"}])
+
     def test_is_dangerous_bash_limits_the_protected_set(self):
         for command in ("rm -rf build", "rm -fr build", "git reset --hard", "git clean -fd", "git push origin main --force"):
             self.assertTrue(main.is_dangerous_bash(command))
@@ -328,7 +332,6 @@ class ToolTests(unittest.TestCase):
         handler.assert_called_once_with(command="git reset --hard")
 
 
-
 class AgentTests(unittest.TestCase):
     def setUp(self):
         self.api_mode = main.API_MODE
@@ -344,11 +347,15 @@ class AgentTests(unittest.TestCase):
     def test_run_agent_uses_explicit_session_model_for_responses(self):
         call = SimpleNamespace(type="function_call", name="bash", arguments='{"command": "echo hello"}', call_id="call-1")
         first = SimpleNamespace(
-            id="resp-1", output=[call], output_text="",
+            id="resp-1",
+            output=[call],
+            output_text="",
             usage=SimpleNamespace(input_tokens=5, output_tokens=3),
         )
         second = SimpleNamespace(
-            id="resp-2", output=[], output_text="Done",
+            id="resp-2",
+            output=[],
+            output_text="Done",
             usage=SimpleNamespace(input_tokens=9, output_tokens=4),
         )
         client = SimpleNamespace(responses=SimpleNamespace(create=Mock(side_effect=[first, second])))
@@ -386,11 +393,15 @@ class AgentTests(unittest.TestCase):
     def test_run_agent_returns_final_text_after_a_tool_call(self):
         call = SimpleNamespace(type="function_call", name="bash", arguments='{"command": "echo hello"}', call_id="call-1")
         first = SimpleNamespace(
-            id="resp-1", output=[call], output_text="",
+            id="resp-1",
+            output=[call],
+            output_text="",
             usage=SimpleNamespace(input_tokens=5, output_tokens=3),
         )
         second = SimpleNamespace(
-            id="resp-2", output=[], output_text="Done",
+            id="resp-2",
+            output=[],
+            output_text="Done",
             usage=SimpleNamespace(input_tokens=9, output_tokens=4),
         )
         client = SimpleNamespace(responses=SimpleNamespace(create=Mock(side_effect=[first, second])))
@@ -456,9 +467,7 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(output.getvalue(), "model: openrouter/free | tokens: 21 | context: 9\n")
 
     def test_render_status_uses_light_pi_palette_in_a_tty(self):
-        with patch("sys.stdout", new_callable=io.StringIO) as output, patch.object(
-            output, "isatty", return_value=True
-        ):
+        with patch("sys.stdout", new_callable=io.StringIO) as output, patch.object(output, "isatty", return_value=True):
             main.render("status", "k | /repo | main")
         self.assertEqual(
             output.getvalue(),
@@ -492,16 +501,12 @@ class AgentTests(unittest.TestCase):
         )
 
     def test_render_pinned_status_falls_back_when_stdout_is_not_a_tty(self):
-        with patch("sys.stdout", new_callable=io.StringIO) as output, patch.object(
-            output, "isatty", return_value=False
-        ):
+        with patch("sys.stdout", new_callable=io.StringIO) as output, patch.object(output, "isatty", return_value=False):
             self.assertFalse(main.render_pinned_status("k | /repo"))
         self.assertEqual(output.getvalue(), "k | /repo\n")
 
     def test_restore_terminal_restores_the_default_scroll_region(self):
-        with patch("sys.stdout", new_callable=io.StringIO) as output, patch.object(
-            output, "isatty", return_value=True
-        ):
+        with patch("sys.stdout", new_callable=io.StringIO) as output, patch.object(output, "isatty", return_value=True):
             main.restore_terminal()
         self.assertEqual(output.getvalue(), "\033[r\033[0m\n")
 
@@ -539,30 +544,22 @@ class AgentTests(unittest.TestCase):
         )
 
     def test_render_tool_uses_bright_blue(self):
-        with patch("sys.stdout", new_callable=io.StringIO) as output, patch.object(
-            output, "isatty", return_value=True
-        ):
+        with patch("sys.stdout", new_callable=io.StringIO) as output, patch.object(output, "isatty", return_value=True):
             main.render("tool", "read file.txt")
         self.assertEqual(output.getvalue(), "  \033[38;2;84;125;167mread file.txt\033[0m\n")
 
     def test_render_error_uses_bright_red(self):
-        with patch("sys.stdout", new_callable=io.StringIO) as output, patch.object(
-            output, "isatty", return_value=True
-        ):
+        with patch("sys.stdout", new_callable=io.StringIO) as output, patch.object(output, "isatty", return_value=True):
             main.render("output", "Error: something went wrong")
         self.assertEqual(output.getvalue(), "\033[38;2;170;85;85mError: something went wrong\033[0m\n")
 
     def test_render_answer_uses_default_terminal_foreground(self):
-        with patch("sys.stdout", new_callable=io.StringIO) as output, patch.object(
-            output, "isatty", return_value=True
-        ):
+        with patch("sys.stdout", new_callable=io.StringIO) as output, patch.object(output, "isatty", return_value=True):
             main.render("answer", "plain text")
         self.assertEqual(output.getvalue(), "\033[38;2;31;35;40mplain text\033[0m\n")
 
     def test_render_answer_plain_when_not_a_tty(self):
-        with patch("sys.stdout", new_callable=io.StringIO) as output, patch.object(
-            output, "isatty", return_value=False
-        ):
+        with patch("sys.stdout", new_callable=io.StringIO) as output, patch.object(output, "isatty", return_value=False):
             main.render("answer", "# Title")
         self.assertEqual(output.getvalue(), "# Title\n")
 

@@ -32,6 +32,12 @@
 - **Tool loop.** `read`, `write`, `edit`, `bash` — the four operations that cover most coding tasks.
 - **Context-mode compaction.** Large tool outputs are truncated to a useful head/tail preview; the full text is saved to disk alongside the session.
 - **Session persistence.** Every conversation is saved to `~/.k/sessions/<id>.json`. Resume any session by ID.
+- **Session discovery.** `/resume` lists up to 20 recent sessions; `/resume <id>` switches to one.
+- **Session metadata.** Saved sessions include a title from the first prompt, model, cwd, and update time.
+- **Session models.** `/model <model-name>` sets and persists the active session's model.
+- **Activity status.** The pinned status temporarily shows `thinking` and tool activity labels.
+- **Dangerous-command confirmation.** K confirms recursive force deletion, hard Git resets, force Git cleans, and force pushes; noninteractive runs reject them.
+- **One-turn Git undo.** `/undo` reverts the last completed agent turn from a clean worktree.
 - **Skills.** Load Markdown skill files from `~/.agents/skills/` to inject system instructions dynamically.
 - **Terminal UI.** Pi-inspired truecolor light/dark themes, pinned status line (showing model, tokens, git branch, cwd), colored Markdown rendering, multiline prompts.
 - **Portable.** Works with OpenAI-compatible providers that support either Responses or Chat Completions — OpenAI, OpenRouter, xAI, local LLMs, and OpenCode Zen.
@@ -102,25 +108,29 @@ Skills are Markdown files in `~/.agents/skills/<name>/SKILL.md`. They act as add
 
 **In-session commands:**
 
-| Command         | Action                        |
-| --------------- | ----------------------------- |
-| `/skills`       | List available skills         |
-| `/skill <name>` | Load a skill for this session |
-| `/skill clear`  | Remove all loaded skills      |
+| Command               | Action                                                       |
+| --------------------- | ------------------------------------------------------------ |
+| `/resume`             | List up to 20 recent sessions                                |
+| `/resume <id>`        | Switch to a saved session                                    |
+| `/model <model-name>` | Set and persist this session's model                         |
+| `/undo`               | Revert the last completed agent turn in a clean Git worktree |
+| `/skills`             | List available skills                                        |
+| `/skill <name>`       | Load a skill for this session                                |
+| `/skill clear`        | Remove all loaded skills                                     |
 
 ### Resuming Sessions
 
-Sessions are saved automatically after every completed answer. Find the session ID with:
-
-```bash
-ls ~/.k/sessions/
-```
-
-Resume with:
+Sessions are saved automatically after every completed answer. Use `/resume` to list up to 20 recent sessions; each entry shows its title, model, cwd, and update time. The title comes from the first prompt. Use `/resume <id>` to switch sessions, or resume at launch with:
 
 ```bash
 uv run python main.py --resume <session-id>
 ```
+
+Use `/model <model-name>` to change and persist the active session's model. While the agent works, the pinned status temporarily shows `thinking` and the active tool name.
+
+**Safety:** K asks before `rm -rf`, `git reset --hard`, force `git clean`, and force pushes. Noninteractive runs reject these commands.
+
+**Undo:** `/undo` works once, only after a task that began with a clean Git worktree. It preserves pre-existing files and declines if anything changed since the task.
 
 ### Themes
 
@@ -498,15 +508,19 @@ Usage: `python minimal_agent.py "find all python files larger than 10KB"`
 
 ## Commands
 
-| Command                     | Action                                       |
-| --------------------------- | -------------------------------------------- |
-| `/quit`                     | Exit without calling the model               |
-| `/skills`                   | List available skills in `~/.agents/skills/` |
-| `/skill <name>`             | Load a skill for this session                |
-| `/skill clear`              | Clear all loaded skills                      |
-| Ctrl+J                      | Insert a line break in the current prompt    |
-| blank prompt / EOF (Ctrl+D) | Exit cleanly                                 |
-| Ctrl+C                      | Interrupt / exit                             |
+| Command                     | Action                                                       |
+| --------------------------- | ------------------------------------------------------------ |
+| `/quit`                     | Exit without calling the model                               |
+| `/resume`                   | List up to 20 recent sessions                                |
+| `/resume <id>`              | Switch to a saved session                                    |
+| `/model <model-name>`       | Set and persist this session's model                         |
+| `/undo`                     | Revert the last completed agent turn in a clean Git worktree |
+| `/skills`                   | List available skills in `~/.agents/skills/`                 |
+| `/skill <name>`             | Load a skill for this session                                |
+| `/skill clear`              | Clear all loaded skills                                      |
+| Ctrl+J                      | Insert a line break in the current prompt                    |
+| blank prompt / EOF (Ctrl+D) | Exit cleanly                                                 |
+| Ctrl+C                      | Interrupt / exit                                             |
 
 ## Reference
 
