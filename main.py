@@ -317,6 +317,18 @@ def session_path(session_id: str) -> Path:
     return sessions_dir() / f"{session_id}.json"
 
 
+def ensure_session_defaults(session: dict) -> dict:
+    session.setdefault("skills", [])
+    session.setdefault("api_mode", API_MODE)
+    session.setdefault("model", MODEL)
+    session.setdefault("title", "")
+    session.setdefault("cwd", "")
+    session.setdefault("created_at", datetime.now(timezone.utc).isoformat())
+    session.setdefault("updated_at", session["created_at"])
+    session.setdefault("undo", None)
+    return session
+
+
 def load_session(session_id: str) -> dict:
     if "/" in session_id or "\\" in session_id or session_id in {"", ".", ".."}:
         raise ValueError("cannot load session: invalid id")
@@ -334,13 +346,53 @@ def load_session(session_id: str) -> dict:
         or ("skills" in session and not isinstance(session["skills"], list))
     ):
         raise ValueError("cannot load session: invalid session data")
-    return session
+    return ensure_session_defaults(session)
 
 
 def save_session(session: dict) -> None:
+    ensure_session_defaults(session)
+    if not session["cwd"]:
+        session["cwd"] = str(Path.cwd())
+    session["updated_at"] = datetime.now(timezone.utc).isoformat()
     path = session_path(session["id"])
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(session, indent=2, default=lambda value: value.to_dict()), encoding="utf-8")
+
+
+MAX_SESSION_LISTING = 20
+
+
+def list_sessions(limit: int = MAX_SESSION_LISTING) -> list[dict[str, str]]:
+    seen = []
+    for path in sorted(sessions_dir().glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+        if len(seen) >= limit:
+            break
+        try:
+            session = load_session(path.stem)
+        except (ValueError, OSError):
+            continue
+        seen.append({
+            "id": session["id"],
+            "title": session.get("title", "") or "(untitled)",
+            "cwd": session.get("cwd", ""),
+            "updated_at": session.get("updated_at", ""),
+            "model": session.get("model", MODEL),
+        })
+    return seen
+
+
+def format_session_list(sessions: list[dict[str, str]]) -> str:
+    if not sessions:
+        return "No saved sessions."
+    lines = ["Recent sessions:"]
+    for s in sessions:
+        parts = [s["id"], s["title"], s["model"]]
+        if s["cwd"]:
+            parts.append(s["cwd"])
+        if s["updated_at"]:
+            parts.append(s["updated_at"][:19])
+        lines.append("  " + " | ".join(parts))
+    return "\n".join(lines)
 
 
 def compact_output(text: str, label: str, session_id: str | None = None) -> str:

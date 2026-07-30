@@ -97,6 +97,50 @@ class IdentityTests(unittest.TestCase):
         self.assertIn("\033[38;2;90;128;128m", main.color("accent"))
 
 
+    def test_load_session_adds_defaults_for_old_valid_session(self):
+        with tempfile.TemporaryDirectory() as d, patch.object(main.Path, "home", return_value=Path(d)):
+            session = {"id": "oldie", "history": [], "transcript": []}
+            main.save_session(session)
+            loaded = main.load_session("oldie")
+        self.assertEqual(loaded["model"], main.MODEL)
+        self.assertEqual(loaded["skills"], [])
+        self.assertEqual(loaded["title"], "")
+        self.assertEqual(loaded["cwd"], str(Path.cwd()))
+        self.assertIsNone(loaded["undo"])
+
+    def test_save_session_sets_created_and_updated_metadata(self):
+        with tempfile.TemporaryDirectory() as d, patch.object(main.Path, "home", return_value=Path(d)):
+            session = {"id": "abc123", "history": [], "transcript": []}
+            main.save_session(session)
+            saved = main.load_session("abc123")
+        self.assertRegex(saved["created_at"], r"^\d{4}-\d{2}-\d{2}T")
+        self.assertRegex(saved["updated_at"], r"^\d{4}-\d{2}-\d{2}T")
+        self.assertEqual(saved["cwd"], str(Path.cwd()))
+        self.assertEqual(saved["model"], main.MODEL)
+
+    def test_list_sessions_is_newest_first_and_skips_invalid_files(self):
+        with tempfile.TemporaryDirectory() as d, patch.object(main.Path, "home", return_value=Path(d)):
+            early = {"id": "early", "history": [], "transcript": []}
+            main.save_session(early)
+            later = {"id": "later", "history": [], "transcript": []}
+            main.save_session(later)
+            # Touch the later file to be newer
+            (main.session_path("later")).touch()
+            # Write an invalid JSON file
+            (main.session_path("bad")).write_text("not json", encoding="utf-8")
+            sessions = main.list_sessions()
+        self.assertEqual([s["id"] for s in sessions], ["later", "early"])
+
+    def test_format_session_list_is_compact_and_handles_empty(self):
+        self.assertEqual(main.format_session_list([]), "No saved sessions.")
+        formatted = main.format_session_list([{
+            "id": "abc123", "title": "Fix parser",
+            "cwd": "/repo", "updated_at": "2026-07-30T12:00:00+00:00",
+            "model": "small",
+        }])
+        self.assertIn("abc123", formatted)
+
+
 class ReadlineTests(unittest.TestCase):
     def test_readline_is_loaded_for_interactive_history(self):
         self.assertIsNotNone(getattr(main, "readline", None))
