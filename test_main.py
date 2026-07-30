@@ -226,6 +226,24 @@ class ToolTests(unittest.TestCase):
         with patch.dict(main.TOOL_HANDLERS, {"list_tool": lambda **kw: [{"type": "input_image", "image_url": "data:img"}]}):
             result = main.dispatch_tool("list_tool", "{}", "call-1")
         self.assertEqual(result["output"], [{"type": "input_image", "image_url": "data:img"}])
+    def test_is_dangerous_bash_limits_the_protected_set(self):
+        for command in ("rm -rf build", "rm -fr build", "git reset --hard", "git clean -fd", "git push origin main --force"):
+            self.assertTrue(main.is_dangerous_bash(command))
+        for command in ("rm file.txt", "git reset --soft HEAD~1", "git push origin main"):
+            self.assertFalse(main.is_dangerous_bash(command))
+
+    def test_dispatch_requires_confirmation_before_dangerous_bash(self):
+        with patch.object(main, "bash") as bash:
+            result = main.dispatch_tool("bash", '{"command":"rm -rf build"}', "call-1", confirm_dangerous=lambda _: False)
+        self.assertIn("rejected", result["output"])
+        bash.assert_not_called()
+
+    def test_dispatch_runs_dangerous_bash_after_confirmation(self):
+        handler = Mock(return_value="done")
+        with patch.dict(main.TOOL_HANDLERS, {"bash": handler}):
+            main.dispatch_tool("bash", '{"command":"git reset --hard"}', "call-1", confirm_dangerous=lambda _: True)
+        handler.assert_called_once_with(command="git reset --hard")
+
 
 
 class AgentTests(unittest.TestCase):

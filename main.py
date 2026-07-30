@@ -4,6 +4,7 @@ import json
 import re
 import readline  # noqa: F401
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -89,6 +90,27 @@ def edit(path: str, oldText: str, newText: str) -> str:
         return f"Edited {target}"
     except (OSError, ValueError) as error:
         return f"Error: cannot edit {path}: {error}"
+
+def is_dangerous_bash(command: str) -> bool:
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return False
+    if not tokens:
+        return False
+    if tokens[0] == "rm":
+        opts = "".join(t for t in tokens if t.startswith("-"))
+        return "r" in opts and "f" in opts
+    if tokens[0] == "git" and len(tokens) >= 3:
+        if tokens[1] == "reset" and tokens[2] == "--hard":
+            return True
+        if tokens[1] == "clean":
+            opts = "".join(t for t in tokens if t.startswith("-"))
+            return "f" in opts
+        if tokens[1] == "push":
+            opts = "".join(t for t in tokens if t.startswith("-"))
+            return "f" in opts or "--force" in tokens or "--force-with-lease" in tokens
+    return False
 
 
 def bash(command: str, timeout: int | None = None) -> str:
@@ -437,6 +459,13 @@ def dispatch_tool(name: str, arguments: str, call_id: str, session_id: str | Non
             "call_id": call_id,
             "output": f"Error: invalid JSON in arguments: {e}",
         }
+    if name == "bash" and confirm_dangerous is not None and is_dangerous_bash(args.get("command", "")):
+        if not confirm_dangerous(args["command"]):
+            return {
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": "Error: dangerous bash command rejected by user",
+            }
     handler = TOOL_HANDLERS.get(name)
     if handler is None:
         return {
