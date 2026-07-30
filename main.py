@@ -798,7 +798,7 @@ def main() -> None:
     parser.add_argument("--theme", choices=PALETTES, default=os.getenv("K_THEME", "light"))
     args, _ = parser.parse_known_args()
     set_theme(args.theme)
-    session = {"id": new_session_id(), "history": [], "transcript": [], "skills": [], "api_mode": API_MODE}
+    session = {"id": new_session_id(), "history": [], "transcript": [], "skills": [], "api_mode": API_MODE, "model": MODEL, "title": ""}
     if args.resume:
         try:
             session = load_session(args.resume)
@@ -806,12 +806,22 @@ def main() -> None:
                 raise ValueError("cannot resume a session created with a different K_API_MODE")
         except ValueError as error:
             render("output", f"Error: {error}")
+    ensure_session_defaults(session)
     client = OpenAI()
+
+    def confirm_dangerous(command: str) -> bool:
+        if not sys.stdin.isatty() or not sys.stdout.isatty():
+            return False
+        return input("Allow dangerous command? [y/N] ").strip().lower() == "y"
+
+    def on_activity(activity: str) -> None:
+        render_pinned_status(status_line("?", None, session["model"], activity))
+
     try:
         if sys.stdout.isatty():
             sys.stdout.write("\033[2J\033[H")
             sys.stdout.flush()
-        render_pinned_status(status_line("?", None), move_cursor=True)
+        render_pinned_status(status_line("?", None, session["model"]), move_cursor=True)
         configure_multiline_input()
         while True:
             try:
@@ -824,25 +834,76 @@ def main() -> None:
             if skill_result:
                 render("output", skill_result)
                 save_session(session)
-                render_pinned_status(status_line("?", None))
+                render_pinned_status(status_line("?", None, session["model"]))
                 continue
-            command = handle_command(task)
-            if command == "quit":
+            if task == "/quit":
                 return
-            if command:
-                render("output", command)
+            if task.startswith("/"):
+                parts = task.split()
+                command = parts[0]
+                if command == "/resume":
+                    if len(parts) == 1:
+                        render("output", format_session_list(list_sessions()))
+                    elif len(parts) == 2:
+                        try:
+                            resumed = load_session(parts[1])
+                            if resumed.get("api_mode", "responses") != API_MODE:
+                                raise ValueError("cannot resume a session created with a different K_API_MODE")
+                        except ValueError as error:
+                            render("output", f"Error: {error}")
+                        else:
+                            session = resumed
+                            session["cwd"] = str(Path.cwd())
+                            save_session(session)
+                            render("output", f"Resumed {session['id']}")
+                            render_pinned_status(status_line("?", None, session["model"]))
+                    else:
+                        render("output", "Usage: /resume [session-id]")
+                    continue
+                if command == "/model":
+                    model = task.removeprefix("/model").strip()
+                    if not model:
+                        render("output", "Usage: /model <model-name>")
+                    else:
+                        session["model"] = model
+                        save_session(session)
+                        render("output", f"Model set to {model}")
+                        render_pinned_status(status_line("?", None, session["model"]))
+                    continue
+                if task == "/undo":
+                    result = apply_undo(session.get("undo"))
+                    if result == "Undo complete.":
+                        session["undo"] = None
+                        save_session(session)
+                    render("output", result)
+                    render_pinned_status(status_line("?", None, session["model"]))
+                    continue
+                render("output", f"Unknown command: {command}")
                 continue
+            if not session["title"]:
+                session["title"] = " ".join(task.split())[:72]
+            checkpoint = begin_undo_checkpoint()
             try:
-                answer, total_tokens, context_tokens, history = run_agent(task, client, session["history"], session["id"], session.get("skills", []))
+                answer, total_tokens, context_tokens, history = run_agent(
+                    task,
+                    client,
+                    session["history"],
+                    session["id"],
+                    session.get("skills", []),
+                    model=session["model"],
+                    confirm_dangerous=confirm_dangerous,
+                    on_activity=on_activity,
+                )
                 session["history"] = history
                 session["transcript"].append({"prompt": task, "answer": answer})
+                session["undo"] = finish_undo_checkpoint(checkpoint)
                 save_session(session)
             except Exception as e:
                 render("output", f"Error: {e}")
-                render_pinned_status(status_line("?", None))
+                render_pinned_status(status_line("?", None, session["model"]))
                 continue
             render("answer", answer)
-            render_pinned_status(status_line(total_tokens, context_tokens))
+            render_pinned_status(status_line(total_tokens, context_tokens, session["model"]))
     except KeyboardInterrupt:
         return
     finally:

@@ -723,6 +723,130 @@ class AgentTests(unittest.TestCase):
                 main.main()
             self.assertEqual(main.load_session("resume-id")["id"], "resume-id")
 
+    def test_main_lists_sessions_for_resume_command(self):
+        sessions = [{"id": "saved-id", "title": "Saved", "model": "provider/model-x", "cwd": "", "updated_at": ""}]
+        with (
+            patch("builtins.input", side_effect=["/resume", ""]),
+            patch.object(main, "OpenAI"),
+            patch.object(main, "list_sessions", return_value=sessions),
+            patch.object(main, "run_agent") as agent,
+            patch.object(main, "render_pinned_status", return_value=True),
+            patch.object(main, "restore_terminal"),
+            patch.object(main, "render") as render,
+        ):
+            main.main()
+        self.assertIn(("output", main.format_session_list(sessions)), [call.args for call in render.call_args_list])
+        agent.assert_not_called()
+
+    def test_main_switches_session_for_resume_id(self):
+        saved = {"id": "saved-id", "history": [], "transcript": [], "skills": [], "api_mode": "responses", "model": "provider/model-x"}
+        with (
+            patch("builtins.input", side_effect=["/resume saved-id", ""]),
+            patch.object(main, "OpenAI"),
+            patch.object(main, "load_session", return_value=saved),
+            patch.object(main, "save_session") as save,
+            patch.object(main, "render_pinned_status", return_value=True) as status,
+            patch.object(main, "restore_terminal"),
+            patch.object(main, "render") as render,
+        ):
+            main.main()
+        self.assertEqual(save.call_args.args[0]["id"], "saved-id")
+        self.assertEqual(save.call_args.args[0]["cwd"], str(Path.cwd()))
+        self.assertIn(("output", "Resumed saved-id"), [call.args for call in render.call_args_list])
+        self.assertTrue(any("model: provider/model-x" in call.args[0] for call in status.call_args_list))
+
+    def test_main_sets_and_persists_session_model(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(main.Path, "home", return_value=Path(directory)):
+            with (
+                patch("builtins.input", side_effect=["/model provider/model-x", "hello", ""]),
+                patch.object(main, "OpenAI"),
+                patch.object(main, "new_session_id", return_value="model-id"),
+                patch.object(main, "begin_undo_checkpoint", return_value=None),
+                patch.object(main, "finish_undo_checkpoint", return_value=None),
+                patch.object(main, "run_agent", return_value=("hi", 1, 1, [])) as agent,
+                patch.object(main, "render_pinned_status", return_value=True),
+                patch.object(main, "restore_terminal"),
+                patch.object(main, "render"),
+            ):
+                main.main()
+            self.assertEqual(agent.call_args.kwargs["model"], "provider/model-x")
+            self.assertEqual(main.load_session("model-id")["model"], "provider/model-x")
+
+    def test_main_undo_clears_record_after_success(self):
+        saved = {"id": "saved-id", "history": [], "transcript": [], "skills": [], "api_mode": "responses", "undo": {"root": "/repo"}}
+        with (
+            patch("sys.argv", ["k", "--resume", "saved-id"]),
+            patch("builtins.input", side_effect=["/undo", ""]),
+            patch.object(main, "OpenAI"),
+            patch.object(main, "load_session", return_value=saved),
+            patch.object(main, "apply_undo", return_value="Undo complete."),
+            patch.object(main, "save_session") as save,
+            patch.object(main, "render_pinned_status", return_value=True),
+            patch.object(main, "restore_terminal"),
+            patch.object(main, "render"),
+        ):
+            main.main()
+        self.assertIsNone(save.call_args.args[0]["undo"])
+
+    def test_main_rejects_dangerous_command_without_tty_confirmation(self):
+        call = SimpleNamespace(type="function_call", name="bash", arguments='{"command": "rm -rf build"}', call_id="call-1")
+        call.to_dict = lambda: {"type": "function_call", "name": "bash", "arguments": '{"command": "rm -rf build"}', "call_id": "call-1"}
+        first = SimpleNamespace(id="resp-1", output=[call], output_text="", usage=None)
+        second = SimpleNamespace(id="resp-2", output=[], output_text="Done", usage=None)
+        client = SimpleNamespace(responses=SimpleNamespace(create=Mock(side_effect=[first, second])))
+        with (
+            patch("builtins.input", side_effect=["remove", ""]),
+            patch("sys.stdin", new_callable=io.StringIO) as stdin,
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+            patch.object(main, "OpenAI", return_value=client),
+            patch.object(main, "bash") as bash,
+            patch.object(main, "render_pinned_status", return_value=True),
+            patch.object(main, "restore_terminal"),
+        ):
+            stdin.isatty = Mock(return_value=False)
+            stdout.isatty = Mock(return_value=False)
+            main.main()
+        bash.assert_not_called()
+
+    def test_main_activity_callback_repaints_status(self):
+        def agent(*args, **kwargs):
+            kwargs["on_activity"]("thinking")
+            kwargs["on_activity"]("bash")
+            return "ok", 1, 1, []
+
+        with (
+            patch("builtins.input", side_effect=["/model provider/model-x", "hello", ""]),
+            patch.object(main, "OpenAI"),
+            patch.object(main, "begin_undo_checkpoint", return_value=None),
+            patch.object(main, "finish_undo_checkpoint", return_value=None),
+            patch.object(main, "run_agent", side_effect=agent),
+            patch.object(main, "render_pinned_status", return_value=True) as status,
+            patch.object(main, "restore_terminal"),
+            patch.object(main, "render"),
+        ):
+            main.main()
+        calls = [call.args[0] for call in status.call_args_list]
+        self.assertTrue(any("model: provider/model-x" in call and "thinking" in call for call in calls))
+        self.assertTrue(any("model: provider/model-x" in call and "bash" in call for call in calls))
+
+    def test_main_derives_title_from_first_normal_prompt_only(self):
+        prompt = "one   two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen"
+        expected = " ".join(prompt.split())[:72]
+        with tempfile.TemporaryDirectory() as directory, patch.object(main.Path, "home", return_value=Path(directory)):
+            with (
+                patch("builtins.input", side_effect=["/model provider/model-x", prompt, ""]),
+                patch.object(main, "OpenAI"),
+                patch.object(main, "new_session_id", return_value="title-id"),
+                patch.object(main, "begin_undo_checkpoint", return_value=None),
+                patch.object(main, "finish_undo_checkpoint", return_value=None),
+                patch.object(main, "run_agent", return_value=("ok", 1, 1, [])),
+                patch.object(main, "render_pinned_status", return_value=True),
+                patch.object(main, "restore_terminal"),
+                patch.object(main, "render"),
+            ):
+                main.main()
+            self.assertEqual(main.load_session("title-id")["title"], expected)
+
     def test_save_session_serializes_response_objects(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(main.Path, "home", return_value=Path(directory)):
             response = SimpleNamespace(to_dict=lambda: {"type": "message", "content": []})
