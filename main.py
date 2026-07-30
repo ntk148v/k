@@ -533,13 +533,14 @@ def finish_undo_checkpoint(checkpoint: dict | None) -> dict | None:
     if _git_root() != root:
         return None
     patch = _git(["diff", "--binary", "HEAD"])
+    index_patch = _git(["diff", "--binary", "--cached", "HEAD"])
     untracked = _git(["ls-files", "--others", "--exclude-standard"])
-    if patch is None or untracked is None:
+    if patch is None or index_patch is None or untracked is None:
         return None
     post_untracked = set(untracked.splitlines())
     if patch == baseline_patch and post_untracked == set(baseline_untracked):
         return None
-    return {"root": root, "patch": patch, "untracked": sorted(post_untracked - set(baseline_untracked))}
+    return {"root": root, "patch": patch, "index_patch": index_patch, "untracked": sorted(post_untracked - set(baseline_untracked))}
 
 
 def apply_undo(record: dict | None) -> str:
@@ -547,18 +548,22 @@ def apply_undo(record: dict | None) -> str:
         return "Undo unavailable: no checkpoint."
     root = record.get("root")
     patch = record.get("patch")
+    index_patch = record.get("index_patch")
     untracked = record.get("untracked")
-    if not isinstance(root, str) or not isinstance(patch, str) or not isinstance(untracked, list) or not all(isinstance(path, str) for path in untracked):
+    if not isinstance(root, str) or not isinstance(patch, str) or not isinstance(index_patch, str) or not isinstance(untracked, list) or not all(isinstance(path, str) for path in untracked):
         return "Undo unavailable: no checkpoint."
     if _git_root() != root:
         return "Undo unavailable: checkpoint is for a different repository."
     current_patch = _git(["diff", "--binary", "HEAD"])
+    current_index_patch = _git(["diff", "--binary", "--cached", "HEAD"])
     current_untracked = _git(["ls-files", "--others", "--exclude-standard"])
-    if current_patch is None or current_untracked is None:
+    if current_patch is None or current_index_patch is None or current_untracked is None:
         return "Undo unavailable: no checkpoint."
-    if current_patch != patch or set(current_untracked.splitlines()) != set(untracked):
+    if current_patch != patch or current_index_patch != index_patch or set(current_untracked.splitlines()) != set(untracked):
         return "Undo refused: worktree changed since the turn."
     if _git(["apply", "--reverse", "--binary"], patch) is None:
+        return "Undo failed: patch could not be applied."
+    if index_patch and _git(["apply", "--reverse", "--binary", "--cached"], index_patch) is None:
         return "Undo failed: patch could not be applied."
     root_path = Path(root).resolve()
     for name in untracked:

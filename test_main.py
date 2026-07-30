@@ -120,6 +120,22 @@ class IdentityTests(unittest.TestCase):
             finally:
                 os.chdir(previous)
 
+    def test_apply_undo_restores_staged_tracked_edit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.init_git_repo(directory)
+            previous = Path.cwd()
+            try:
+                os.chdir(root)
+                checkpoint = main.begin_undo_checkpoint()
+                (root / "note.txt").write_text("after\n", encoding="utf-8")
+                self.git(root, "add", "note.txt")
+                record = main.finish_undo_checkpoint(checkpoint)
+                self.assertEqual(main.apply_undo(record), "Undo complete.")
+                self.assertEqual((root / "note.txt").read_text(encoding="utf-8"), "before\n")
+                self.assertEqual(self.git(root, "status", "--porcelain"), "")
+            finally:
+                os.chdir(previous)
+
     def test_apply_undo_refuses_when_worktree_changed_after_turn(self):
         with tempfile.TemporaryDirectory() as directory:
             root = self.init_git_repo(directory)
