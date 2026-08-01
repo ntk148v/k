@@ -103,6 +103,34 @@ def is_dangerous_bash(command: str) -> bool:
     def is_dangerous_simple(simple: list[str]) -> bool:
         if not simple:
             return False
+        executable = Path(simple[0]).name if simple[0].startswith("/") else simple[0]
+        simple[0] = executable
+
+        # `command <cmd>` and `env <cmd>` are transparent only with no wrapper options.
+        if executable in {"command", "env"}:
+            if len(simple) < 2 or simple[1].startswith("-"):
+                return True
+            executable = Path(simple[1]).name if simple[1].startswith("/") else simple[1]
+            simple = [executable, *simple[2:]]
+
+        # Shell interpreters and privilege/execution wrappers can conceal arbitrary
+        # commands, so require confirmation without interpreting their arguments.
+        if executable in {"sh", "bash", "dash", "zsh", "ksh", "fish", "sudo", "doas", "xargs"}:
+            return True
+
+        # Remove only leading `-C <path>` / `-C<path>` Git global options. Any other
+        # leading Git global option could redirect the repository, so confirm it.
+        if executable == "git":
+            index = 1
+            while index < len(simple) and simple[index].startswith("-"):
+                if simple[index] == "-C" and index + 1 < len(simple):
+                    index += 2
+                elif simple[index].startswith("-C") and len(simple[index]) > 2:
+                    index += 1
+                else:
+                    return True
+            simple = ["git", *simple[index:]]
+
         end = simple.index("--") if "--" in simple else len(simple)
         options = [token for token in simple[1:end] if token.startswith("-")]
         short_options = "".join(token[1:] for token in options if not token.startswith("--"))

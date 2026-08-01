@@ -354,6 +354,25 @@ class ToolTests(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertFalse(main.is_dangerous_bash(command))
 
+    def test_is_dangerous_bash_requires_confirmation_for_wrapped_protected_commands(self):
+        for command in (
+            "env rm -rf tmp",
+            "command rm -rf tmp",
+            "/bin/rm -rf tmp",
+            "git -C . reset --hard",
+            "sh -c 'rm -rf tmp'",
+            "sudo rm -rf tmp",
+        ):
+            with self.subTest(command=command):
+                self.assertTrue(main.is_dangerous_bash(command))
+
+    def test_dispatch_rejects_indirect_dangerous_bash_without_confirmation(self):
+        handler = Mock()
+        with patch.dict(main.TOOL_HANDLERS, {"bash": handler}):
+            result = main.dispatch_tool("bash", '{"command":"env rm -rf tmp"}', "call-1")
+        self.assertIn("rejected", result["output"])
+        handler.assert_not_called()
+
     def test_dispatch_requires_confirmation_before_dangerous_bash(self):
         handler = Mock()
         with patch.dict(main.TOOL_HANDLERS, {"bash": handler}):
