@@ -128,7 +128,7 @@ uv run python main.py --resume <session-id>
 
 Use `/model <model-name>` to change and persist the active session's model. While the agent works, the pinned status temporarily shows `thinking` and the active tool name.
 
-**Safety:** K asks before `rm -rf`, `git reset --hard`, force `git clean`, and force pushes. Noninteractive runs reject these commands.
+**Safety:** K asks before recursive-force deletion, `git reset --hard`, forced `git clean`, and force pushes. Commands that use shell indirection or unsupported wrappers also require confirmation rather than being run unchecked. Noninteractive runs reject confirmed commands.
 
 **Undo:** `/undo` works once, only after a task that began with a clean Git worktree. It preserves pre-existing files and declines if anything changed since the task.
 
