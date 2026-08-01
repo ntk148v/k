@@ -100,22 +100,31 @@ def is_dangerous_bash(command: str) -> bool:
     except ValueError:
         return False
 
+    ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
     def is_dangerous_simple(simple: list[str]) -> bool:
         if not simple:
             return False
-        executable = Path(simple[0]).name if simple[0].startswith("/") else simple[0]
-        simple[0] = executable
-
-        # `command <cmd>` and `env <cmd>` are transparent only with no wrapper options.
-        if executable in {"command", "env"}:
-            if len(simple) < 2 or simple[1].startswith("-"):
+        # ponytail: bounded wrapper stripping; add new transparent wrapper
+        # names here and extend the bound only when chains need to grow.
+        for _ in range(4):
+            if not simple:
                 return True
-            executable = Path(simple[1]).name if simple[1].startswith("/") else simple[1]
-            simple = [executable, *simple[2:]]
-
-        # Shell interpreters and privilege/execution wrappers can conceal arbitrary
-        # commands, so require confirmation without interpreting their arguments.
-        if executable in {"sh", "bash", "dash", "zsh", "ksh", "fish", "sudo", "doas", "xargs"}:
+            while simple and ASSIGNMENT.match(simple[0]):
+                simple = simple[1:]
+            if not simple:
+                return True
+            executable = Path(simple[0]).name if simple[0].startswith("/") else simple[0]
+            simple[0] = executable
+            if executable in {"sh", "bash", "dash", "zsh", "ksh", "fish", "sudo", "doas", "xargs"}:
+                return True
+            if executable in {"command", "exec", "nohup", "nice", "env"}:
+                if len(simple) > 1 and simple[1].startswith("-"):
+                    return True
+                simple = simple[1:]
+                continue
+            break
+        if simple[0] in {"command", "exec", "nohup", "nice", "env"}:
             return True
 
         # Remove only leading `-C <path>` / `-C<path>` Git global options. Any other

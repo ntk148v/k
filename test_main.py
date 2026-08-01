@@ -362,9 +362,21 @@ class ToolTests(unittest.TestCase):
             "git -C . reset --hard",
             "sh -c 'rm -rf tmp'",
             "sudo rm -rf tmp",
+            "PATH=/bin rm -rf tmp",
+            "exec rm -rf tmp",
+            "nice rm -rf tmp",
+            "nohup rm -rf tmp",
+            "env PATH=/bin rm -rf tmp",
+            "nice -n 5 rm -rf tmp",
+            "exec -a x rm -rf tmp",
         ):
             with self.subTest(command=command):
                 self.assertTrue(main.is_dangerous_bash(command))
+
+    def test_is_dangerous_bash_keeps_harmless_wrapped_commands_unconfirmed(self):
+        for command in ("PATH=/bin echo hi", "nice echo hi", "nohup echo hi", "command echo hi"):
+            with self.subTest(command=command):
+                self.assertFalse(main.is_dangerous_bash(command))
 
     def test_dispatch_rejects_indirect_dangerous_bash_without_confirmation(self):
         handler = Mock()
