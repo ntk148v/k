@@ -533,6 +533,8 @@ def dispatch_tool(
             "call_id": call_id,
             "output": f"Error: Unknown tool: {name}",
         }
+    if on_activity:
+        on_activity(name)
     try:
         result = handler(**args)
     except Exception as e:
@@ -813,9 +815,6 @@ def run_responses_agent(
             history.extend(output)
             return response.output_text, total_tokens, context_tokens, history
         history.extend(output)
-        for call in calls:
-            if on_activity:
-                on_activity(call.name)
         history.extend(
             dispatch_tool(call.name, call.arguments, call.call_id, session_id, confirm_dangerous=confirm_dangerous, on_activity=on_activity) for call in calls
         )
@@ -876,8 +875,6 @@ def run_chat_agent(
         if not calls:
             return message.content or "", total_tokens, context_tokens, history
         for call in calls:
-            if on_activity:
-                on_activity(call.function.name)
             result = dispatch_tool(
                 call.function.name, call.function.arguments, call.id, session_id, confirm_dangerous=confirm_dangerous, on_activity=on_activity
             )

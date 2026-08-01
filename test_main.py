@@ -373,6 +373,18 @@ class ToolTests(unittest.TestCase):
         self.assertIn("rejected", result["output"])
         handler.assert_not_called()
 
+    def test_dispatch_reports_activity_immediately_before_the_handler(self):
+        events = []
+
+        def handler(**kwargs):
+            events.append("handler")
+            return "ok"
+
+        with patch.dict(main.TOOL_HANDLERS, {"read": handler}):
+            main.dispatch_tool("read", '{"path":"note.txt"}', "call-1", on_activity=events.append)
+
+        self.assertEqual(events, ["read", "handler"])
+
     def test_dispatch_requires_confirmation_before_dangerous_bash(self):
         handler = Mock()
         with patch.dict(main.TOOL_HANDLERS, {"bash": handler}):
@@ -438,6 +450,29 @@ class AgentTests(unittest.TestCase):
 
         first_call = client.chat.completions.create.call_args_list[0]
         self.assertEqual(first_call.kwargs["model"], "provider/model-y")
+
+    def test_responses_agent_announces_each_tool_only_when_it_dispatches(self):
+        calls = [
+            SimpleNamespace(type="function_call", name="read", arguments='{"path":"a.txt"}', call_id="call-1"),
+            SimpleNamespace(type="function_call", name="bash", arguments='{"command":"echo ok"}', call_id="call-2"),
+        ]
+        first = SimpleNamespace(id="resp-1", output=calls, output_text="", usage=None)
+        second = SimpleNamespace(id="resp-2", output=[], output_text="Done", usage=None)
+        client = SimpleNamespace(responses=SimpleNamespace(create=Mock(side_effect=[first, second])))
+        events = []
+
+        def read_handler(**kwargs):
+            events.append("read handler")
+            return "read"
+
+        def bash_handler(**kwargs):
+            events.append("bash handler")
+            return "bash"
+
+        with patch.dict(main.TOOL_HANDLERS, {"read": read_handler, "bash": bash_handler}):
+            main.run_agent("go", client, on_activity=events.append)
+
+        self.assertEqual(events, ["thinking", "read", "read handler", "bash", "bash handler", "thinking"])
 
     def test_compact_output_keeps_short_text(self):
         self.assertEqual(main.compact_output("short", "bash", "s1"), "short")
