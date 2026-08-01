@@ -546,6 +546,35 @@ class AgentTests(unittest.TestCase):
         messages = client.chat.completions.create.call_args.kwargs["messages"]
         self.assertEqual(messages[1], {"role": "assistant", "content": "old reply"})
 
+    def test_chat_agent_omits_invalid_legacy_assistant_message(self):
+        message = SimpleNamespace(content="Done", tool_calls=[])
+        response = SimpleNamespace(
+            choices=[SimpleNamespace(message=message)],
+            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
+        )
+        client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=Mock(return_value=response))))
+        history = [
+            {"role": "assistant", "content": None},
+            {"role": "assistant", "content": "Earlier answer"},
+        ]
+
+        with patch.object(main, "API_MODE", "chat-completions"):
+            _, _, _, saved_history = main.run_agent("next task", client, history)
+
+        sent = client.chat.completions.create.call_args.kwargs["messages"]
+        self.assertNotIn({"role": "assistant", "content": None}, sent)
+        self.assertNotIn({"role": "assistant", "content": None}, saved_history)
+        self.assertIn({"role": "assistant", "content": "Earlier answer"}, sent)
+
+    def test_chat_agent_rejects_empty_final_provider_message(self):
+        message = SimpleNamespace(content=None, tool_calls=[])
+        response = SimpleNamespace(choices=[SimpleNamespace(message=message)], usage=None)
+        client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=Mock(return_value=response))))
+
+        with patch.object(main, "API_MODE", "chat-completions"):
+            with self.assertRaisesRegex(RuntimeError, "provider response is malformed"):
+                main.run_agent("next task", client)
+
     def test_run_agent_rejects_unknown_api_mode(self):
         with patch.object(main, "API_MODE", "unknown"):
             with self.assertRaisesRegex(RuntimeError, "K_API_MODE"):

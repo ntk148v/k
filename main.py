@@ -833,12 +833,20 @@ def run_chat_agent(
     confirm_dangerous: object = None,
     on_activity: object = None,
 ) -> tuple[str, int, int | None, list[object]]:
-    history = list(history or [])
+    saved_history = list(history or [])
+    history = []
     # Older k versions persisted empty tool_calls arrays on ordinary assistant
-    # messages. OpenAI-compatible providers can reject those histories.
-    for item in history:
-        if isinstance(item, dict) and item.get("role") == "assistant" and item.get("tool_calls") == []:
-            item.pop("tool_calls")
+    # messages, and some providers returned assistant messages with neither
+    # content nor tool calls. Both forms are invalid for Chat Completions.
+    for item in saved_history:
+        if isinstance(item, dict) and item.get("role") == "assistant":
+            content = item.get("content")
+            tool_calls = item.get("tool_calls")
+            if not content and not tool_calls:
+                continue
+            if tool_calls == []:
+                item = {key: value for key, value in item.items() if key != "tool_calls"}
+        history.append(item)
     history.append({"role": "user", "content": task})
     total_tokens = 0
     context_tokens = None
@@ -866,14 +874,17 @@ def run_chat_agent(
             for call in calls
         ):
             raise RuntimeError("provider response is malformed")
-        assistant_message = {"role": "assistant", "content": getattr(message, "content", None)}
+        content = getattr(message, "content", None)
+        if not calls and not content:
+            raise RuntimeError("provider response is malformed")
+        assistant_message = {"role": "assistant", "content": content}
         if calls:
             assistant_message["tool_calls"] = [
                 {"id": call.id, "type": "function", "function": {"name": call.function.name, "arguments": call.function.arguments}} for call in calls
             ]
         history.append(assistant_message)
         if not calls:
-            return message.content or "", total_tokens, context_tokens, history
+            return content, total_tokens, context_tokens, history
         for call in calls:
             result = dispatch_tool(
                 call.function.name, call.function.arguments, call.id, session_id, confirm_dangerous=confirm_dangerous, on_activity=on_activity
