@@ -638,7 +638,7 @@ def apply_undo(record: dict | None) -> str:
         return "Undo unavailable: no checkpoint."
     if current_patch != patch or current_index_patch != index_patch or set(current_untracked.splitlines()) != set(untracked):
         return "Undo refused: worktree changed since the turn."
-    if _git(["apply", "--reverse", "--binary"], patch) is None:
+    if patch and _git(["apply", "--reverse", "--binary"], patch) is None:
         return "Undo failed: patch could not be applied."
     if index_patch and _git(["apply", "--reverse", "--binary", "--cached"], index_patch) is None:
         return "Undo failed: patch could not be applied."

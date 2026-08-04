@@ -139,6 +139,21 @@ class IdentityTests(unittest.TestCase):
             finally:
                 os.chdir(previous)
 
+    def test_apply_undo_removes_untracked_file_with_no_tracked_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.init_git_repo(directory)
+            previous = Path.cwd()
+            try:
+                os.chdir(root)
+                checkpoint = main.begin_undo_checkpoint()
+                (root / "file.txt").write_text("dmvt dmfpt\n", encoding="utf-8")
+                record = main.finish_undo_checkpoint(checkpoint)
+                self.assertEqual(main.apply_undo(record), "Undo complete.")
+                self.assertFalse((root / "file.txt").exists())
+                self.assertEqual(self.git(root, "status", "--porcelain"), "")
+            finally:
+                os.chdir(previous)
+
     def test_apply_undo_restores_staged_tracked_edit(self):
         with tempfile.TemporaryDirectory() as directory:
             root = self.init_git_repo(directory)
