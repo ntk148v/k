@@ -4,10 +4,10 @@ import json
 import re
 import readline  # noqa: F401
 import os
-import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -41,6 +41,22 @@ IMAGE_TYPES = {
     ".webp": "image/webp",
 }
 
+MAX_TEXT_FILE_BYTES = 1_000_000
+MAX_IMAGE_FILE_BYTES = 5_000_000
+DEFAULT_BASH_TIMEOUT = 60
+MAX_AGENT_TOOL_TURNS = 20
+MAX_HISTORY_ITEMS = 200
+
+
+def project_path(path: str) -> Path:
+    root = Path.cwd().resolve()
+    target = Path(path).resolve(strict=False)
+    try:
+        target.relative_to(root)
+    except ValueError:
+        raise ValueError("path is outside the project") from None
+    return target
+
 
 def read(path: str, offset: int = 1, limit: int = 2000) -> str | list[dict[str, str]]:
     if offset < 1:
@@ -48,8 +64,10 @@ def read(path: str, offset: int = 1, limit: int = 2000) -> str | list[dict[str, 
     if limit < 1:
         return "Error: limit must be at least 1"
     try:
-        target = Path(path)
+        target = project_path(path)
         if target.suffix.lower() in IMAGE_TYPES:
+            if target.stat().st_size > MAX_IMAGE_FILE_BYTES:
+                return f"Error: image exceeds {MAX_IMAGE_FILE_BYTES}-byte limit"
             data = base64.b64encode(target.read_bytes()).decode()
             return [
                 {
@@ -57,6 +75,8 @@ def read(path: str, offset: int = 1, limit: int = 2000) -> str | list[dict[str, 
                     "image_url": f"data:{IMAGE_TYPES[target.suffix.lower()]};base64,{data}",
                 }
             ]
+        if target.stat().st_size > MAX_TEXT_FILE_BYTES:
+            return f"Error: file exceeds {MAX_TEXT_FILE_BYTES}-byte limit"
         lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
         return "\n".join(
             f"{number}: {line}"
@@ -71,7 +91,7 @@ def read(path: str, offset: int = 1, limit: int = 2000) -> str | list[dict[str, 
 
 def write(path: str, content: str) -> str:
     try:
-        target = Path(path)
+        target = project_path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
         return f"Wrote {target}"
@@ -81,7 +101,7 @@ def write(path: str, content: str) -> str:
 
 def edit(path: str, oldText: str, newText: str) -> str:
     try:
-        target = Path(path)
+        target = project_path(path)
         content = target.read_text(encoding="utf-8", errors="replace")
         if content.count(oldText) != 1:
             return "Error: oldText must occur exactly once"
@@ -91,80 +111,10 @@ def edit(path: str, oldText: str, newText: str) -> str:
         return f"Error: cannot edit {path}: {error}"
 
 
-def is_dangerous_bash(command: str) -> bool:
-    try:
-        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()")
-        lexer.whitespace_split = True
-        lexer.commenters = ""
-        tokens = list(lexer)
-    except ValueError:
-        return False
-
-    ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-
-    def is_dangerous_simple(simple: list[str]) -> bool:
-        if not simple:
-            return False
-        # ponytail: bounded wrapper stripping; add new transparent wrapper
-        # names here and extend the bound only when chains need to grow.
-        for _ in range(4):
-            if not simple:
-                return True
-            while simple and ASSIGNMENT.match(simple[0]):
-                simple = simple[1:]
-            if not simple:
-                return True
-            executable = Path(simple[0]).name if simple[0].startswith("/") else simple[0]
-            simple[0] = executable
-            if executable in {"sh", "bash", "dash", "zsh", "ksh", "fish", "sudo", "doas", "xargs"}:
-                return True
-            if executable in {"command", "exec", "nohup", "nice", "env"}:
-                if len(simple) > 1 and simple[1].startswith("-"):
-                    return True
-                simple = simple[1:]
-                continue
-            break
-        if simple[0] in {"command", "exec", "nohup", "nice", "env"}:
-            return True
-
-        # Remove only leading `-C <path>` / `-C<path>` Git global options. Any other
-        # leading Git global option could redirect the repository, so confirm it.
-        if executable == "git":
-            index = 1
-            while index < len(simple) and simple[index].startswith("-"):
-                if simple[index] == "-C" and index + 1 < len(simple):
-                    index += 2
-                elif simple[index].startswith("-C") and len(simple[index]) > 2:
-                    index += 1
-                else:
-                    return True
-            simple = ["git", *simple[index:]]
-
-        end = simple.index("--") if "--" in simple else len(simple)
-        options = [token for token in simple[1:end] if token.startswith("-")]
-        short_options = "".join(token[1:] for token in options if not token.startswith("--"))
-        if simple[0] == "rm":
-            return ("r" in short_options or "R" in short_options or "--recursive" in options) and ("f" in short_options or "--force" in options)
-        if simple[:2] == ["git", "reset"]:
-            return "--hard" in options
-        if simple[:2] == ["git", "clean"]:
-            return "f" in short_options or "--force" in options
-        if simple[:2] == ["git", "push"]:
-            return "f" in short_options or "--force" in options or "--force-with-lease" in options
-        return False
-
-    simple: list[str] = []
-    for token in [*tokens, ";"]:
-        if token and set(token) <= set(";&|()"):
-            if is_dangerous_simple(simple):
-                return True
-            simple = []
-        else:
-            simple.append(token)
-    return False
-
-
 def bash(command: str, timeout: int | None = None) -> str:
+    effective_timeout = DEFAULT_BASH_TIMEOUT if timeout is None else timeout
+    if not isinstance(effective_timeout, int) or not 1 <= effective_timeout <= DEFAULT_BASH_TIMEOUT:
+        return f"Error: timeout must be between 1 and {DEFAULT_BASH_TIMEOUT}s"
     try:
         result = subprocess.run(
             command,
@@ -173,7 +123,7 @@ def bash(command: str, timeout: int | None = None) -> str:
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            timeout=timeout,
+            timeout=effective_timeout,
             encoding="utf-8",
             errors="replace",
         )
@@ -181,7 +131,7 @@ def bash(command: str, timeout: int | None = None) -> str:
             return f"[exit {result.returncode}]\n{result.stdout}"
         return result.stdout
     except subprocess.TimeoutExpired:
-        return f"Error: command timed out after {timeout}s"
+        return f"Error: command timed out after {effective_timeout}s"
     except OSError as e:
         return f"Error: {e}"
 
@@ -391,7 +341,13 @@ def k_dir() -> Path:
 
 
 def sessions_dir() -> Path:
-    return k_dir() / "sessions"
+    path = k_dir() / "sessions"
+    path.mkdir(parents=True, exist_ok=True)
+    try:
+        path.chmod(0o700)
+    except OSError:
+        pass
+    return path
 
 
 def new_session_id() -> str:
@@ -439,14 +395,27 @@ def load_session(session_id: str) -> dict:
     return ensure_session_defaults(session)
 
 
+def write_private_text(path: Path, content: str) -> None:
+    fd, temp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(content)
+        os.chmod(temp_name, 0o600)
+        os.replace(temp_name, path)
+    except BaseException:
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+        raise
+
+
 def save_session(session: dict) -> None:
     ensure_session_defaults(session)
     if not session["cwd"]:
         session["cwd"] = str(Path.cwd())
     session["updated_at"] = datetime.now(timezone.utc).isoformat()
-    path = session_path(session["id"])
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(session, indent=2, default=lambda value: value.to_dict()), encoding="utf-8")
+    write_private_text(session_path(session["id"]), json.dumps(session, indent=2, default=lambda value: value.to_dict()))
 
 
 MAX_SESSION_LISTING = 20
@@ -495,7 +464,7 @@ def compact_output(text: str, label: str, session_id: str | None = None) -> str:
         artifact_dir = sessions_dir() / f"{session_id}-artifacts"
         artifact_dir.mkdir(parents=True, exist_ok=True)
         artifact = artifact_dir / f"{label}-{datetime.now(timezone.utc).strftime('%H%M%S')}-{uuid4().hex[:6]}.txt"
-        artifact.write_text(text, encoding="utf-8")
+        write_private_text(artifact, text)
         saved = f"\nFull output saved: {artifact}"
     return f"[context-mode: output compacted from {len(text)} chars]\n{head}\n...\n{tail}{saved}"
 
@@ -519,7 +488,7 @@ Guidelines:
 
 
 def dispatch_tool(
-    name: str, arguments: str, call_id: str, session_id: str | None = None, *, confirm_dangerous: object = None, on_activity: object = None
+    name: str, arguments: str, call_id: str, session_id: str | None = None, *, confirm_bash: object = None, on_activity: object = None
 ) -> dict:
     try:
         args = json.loads(arguments)
@@ -530,12 +499,12 @@ def dispatch_tool(
             "output": f"Error: invalid JSON in arguments: {e}",
         }
     command = args.get("command") if isinstance(args, dict) else None
-    if name == "bash" and isinstance(command, str) and is_dangerous_bash(command):
-        if confirm_dangerous is None or not confirm_dangerous(command):
+    if name == "bash":
+        if not isinstance(command, str) or confirm_bash is None or not confirm_bash(command):
             return {
                 "type": "function_call_output",
                 "call_id": call_id,
-                "output": "Error: dangerous bash command rejected by user",
+                "output": "Error: bash command rejected by user",
             }
     handler = TOOL_HANDLERS.get(name)
     if handler is None:
@@ -783,17 +752,32 @@ def run_agent(
     skills: list[str] | None = None,
     *,
     model: str = MODEL,
-    confirm_dangerous: object = None,
+    confirm_bash: object = None,
     on_activity: object = None,
 ) -> tuple[str, int, int | None, list[object]]:
     instructions, missing = skill_instructions(skills or [])
     for name in missing:
         render("info", f"Warning: skill '{name}' not found, skipping")
     if API_MODE == "responses":
-        return run_responses_agent(task, client, instructions, history, session_id, model=model, confirm_dangerous=confirm_dangerous, on_activity=on_activity)
+        return run_responses_agent(task, client, instructions, history, session_id, model=model, confirm_bash=confirm_bash, on_activity=on_activity)
     if API_MODE == "chat-completions":
-        return run_chat_agent(task, client, instructions, history, session_id, model=model, confirm_dangerous=confirm_dangerous, on_activity=on_activity)
+        return run_chat_agent(task, client, instructions, history, session_id, model=model, confirm_bash=confirm_bash, on_activity=on_activity)
     raise RuntimeError("K_API_MODE must be 'responses' or 'chat-completions'")
+
+
+def _trim_history(history: list) -> list:
+    if len(history) <= MAX_HISTORY_ITEMS:
+        return history
+    trimmed = history[-MAX_HISTORY_ITEMS:]
+
+    def is_orphan(item: object) -> bool:
+        if isinstance(item, dict):
+            return item.get("role") == "tool" or item.get("type") == "function_call"
+        return getattr(item, "type", None) == "function_call"
+
+    while trimmed and is_orphan(trimmed[0]):
+        trimmed = trimmed[1:]
+    return trimmed
 
 
 def run_responses_agent(
@@ -804,17 +788,18 @@ def run_responses_agent(
     session_id: str | None,
     *,
     model: str = MODEL,
-    confirm_dangerous: object = None,
+    confirm_bash: object = None,
     on_activity: object = None,
 ) -> tuple[str, int, int | None, list[object]]:
     history = list(history or [])
     history.append({"role": "user", "content": task})
     total_tokens = 0
     context_tokens = None
+    tool_turns = 0
     while True:
         if on_activity:
             on_activity("thinking")
-        response = client.responses.create(model=model, instructions=instructions, input=list(history), tools=TOOLS)
+        response = client.responses.create(model=model, instructions=instructions, input=list(_trim_history(history)), tools=TOOLS)
         output = getattr(response, "output", None)
         if not isinstance(output, list):
             raise RuntimeError("provider response is malformed")
@@ -829,10 +814,13 @@ def run_responses_agent(
             raise RuntimeError("provider response is malformed")
         if not calls:
             history.extend(output)
-            return response.output_text, total_tokens, context_tokens, history
+            return response.output_text, total_tokens, context_tokens, _trim_history(history)
+        tool_turns += 1
+        if tool_turns > MAX_AGENT_TOOL_TURNS:
+            raise RuntimeError(f"agent exceeded {MAX_AGENT_TOOL_TURNS} tool turns")
         history.extend(output)
         history.extend(
-            dispatch_tool(call.name, call.arguments, call.call_id, session_id, confirm_dangerous=confirm_dangerous, on_activity=on_activity) for call in calls
+            dispatch_tool(call.name, call.arguments, call.call_id, session_id, confirm_bash=confirm_bash, on_activity=on_activity) for call in calls
         )
         for call in calls:
             render("tool", f"{call.name}({call.arguments})")
@@ -846,7 +834,7 @@ def run_chat_agent(
     session_id: str | None,
     *,
     model: str = MODEL,
-    confirm_dangerous: object = None,
+    confirm_bash: object = None,
     on_activity: object = None,
 ) -> tuple[str, int, int | None, list[object]]:
     saved_history = list(history or [])
@@ -866,10 +854,11 @@ def run_chat_agent(
     history.append({"role": "user", "content": task})
     total_tokens = 0
     context_tokens = None
+    tool_turns = 0
     while True:
         if on_activity:
             on_activity("thinking")
-        response = client.chat.completions.create(model=model, messages=[{"role": "system", "content": instructions}, *history], tools=CHAT_TOOLS)
+        response = client.chat.completions.create(model=model, messages=[{"role": "system", "content": instructions}, *_trim_history(history)], tools=CHAT_TOOLS)
         choices = getattr(response, "choices", None)
         if not isinstance(choices, list) or not choices:
             raise RuntimeError("provider response is malformed")
@@ -900,10 +889,13 @@ def run_chat_agent(
             ]
         history.append(assistant_message)
         if not calls:
-            return content, total_tokens, context_tokens, history
+            return content, total_tokens, context_tokens, _trim_history(history)
+        tool_turns += 1
+        if tool_turns > MAX_AGENT_TOOL_TURNS:
+            raise RuntimeError(f"agent exceeded {MAX_AGENT_TOOL_TURNS} tool turns")
         for call in calls:
             result = dispatch_tool(
-                call.function.name, call.function.arguments, call.id, session_id, confirm_dangerous=confirm_dangerous, on_activity=on_activity
+                call.function.name, call.function.arguments, call.id, session_id, confirm_bash=confirm_bash, on_activity=on_activity
             )
             history.append({"role": "tool", "tool_call_id": call.id, "content": result["output"]})
             render("tool", f"{call.function.name}({call.function.arguments})")
@@ -931,10 +923,10 @@ def main() -> None:
     ensure_session_defaults(session)
     client = OpenAI()
 
-    def confirm_dangerous(command: str) -> bool:
+    def confirm_bash(command: str) -> bool:
         if not sys.stdin.isatty() or not sys.stdout.isatty():
             return False
-        return input("Allow dangerous command? [y/N] ").strip().lower() == "y"
+        return input("Allow bash command? [y/N] ").strip().lower() == "y"
 
     def on_activity(activity: str) -> None:
         render_pinned_status(status_line("?", None, session["model"], activity))
@@ -1015,7 +1007,7 @@ def main() -> None:
                     session["id"],
                     session.get("skills", []),
                     model=session["model"],
-                    confirm_dangerous=confirm_dangerous,
+                    confirm_bash=confirm_bash,
                     on_activity=on_activity,
                 )
                 session["history"] = history

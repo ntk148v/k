@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -40,7 +41,7 @@ class IdentityTests(unittest.TestCase):
     def test_load_session_rejects_non_dict_json(self):
         with tempfile.TemporaryDirectory() as d, patch.object(main.Path, "home", return_value=Path(d)):
             path = main.session_path("arr")
-            path.parent.mkdir(parents=True)
+            path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("[]", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "expected an object"):
                 main.load_session("arr")
@@ -232,6 +233,22 @@ class IdentityTests(unittest.TestCase):
         self.assertEqual(saved["cwd"], str(Path.cwd()))
         self.assertEqual(saved["model"], main.MODEL)
 
+    @unittest.skipIf(os.name == "nt", "POSIX permissions do not apply on Windows")
+    def test_save_session_uses_owner_only_permissions(self):
+        with tempfile.TemporaryDirectory() as home, patch.object(main.Path, "home", return_value=Path(home)):
+            session = {"id": "session", "history": [], "transcript": []}
+            main.save_session(session)
+            path = main.session_path("session")
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
+
+    def test_save_session_twice_is_valid_json(self):
+        with tempfile.TemporaryDirectory() as home, patch.object(main.Path, "home", return_value=Path(home)):
+            session = {"id": "twice", "history": [], "transcript": []}
+            main.save_session(session)
+            main.save_session(session)
+            self.assertEqual(main.load_session("twice")["id"], "twice")
+
     def test_list_sessions_is_newest_first_and_skips_invalid_files(self):
         with tempfile.TemporaryDirectory() as d, patch.object(main.Path, "home", return_value=Path(d)):
             early = {"id": "early", "history": [], "transcript": [], "updated_at": "2026-07-30T10:00:00+00:00"}
@@ -274,40 +291,67 @@ class ReadlineTests(unittest.TestCase):
 
 
 class ToolTests(unittest.TestCase):
+    def setUp(self):
+        self._previous_cwd = Path.cwd()
+        self._workspace = tempfile.TemporaryDirectory()
+        os.chdir(self._workspace.name)
+
+    def tearDown(self):
+        os.chdir(self._previous_cwd)
+        self._workspace.cleanup()
+
     def test_read_respects_offset_and_limit(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory, "notes.txt")
-            path.write_text("first\nsecond\nthird\n", encoding="utf-8")
-            self.assertEqual(main.read(str(path), offset=2, limit=1), "2: second")
+        Path("notes.txt").write_text("first\nsecond\nthird\n", encoding="utf-8")
+        self.assertEqual(main.read("notes.txt", offset=2, limit=1), "2: second")
 
     def test_read_returns_an_image_attachment(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory, "pixel.png")
-            path.write_bytes(b"png-bytes")
-            result = main.read(str(path))
+        Path("pixel.png").write_bytes(b"png-bytes")
+        result = main.read("pixel.png")
         self.assertEqual(result[0]["type"], "input_image")
         self.assertTrue(result[0]["image_url"].startswith("data:image/png;base64,"))
 
+    def test_read_rejects_text_file_larger_than_limit(self):
+        with patch.object(main, "MAX_TEXT_FILE_BYTES", 4):
+            Path("large.txt").write_text("12345", encoding="utf-8")
+            self.assertEqual(main.read("large.txt"), "Error: file exceeds 4-byte limit")
+
+    def test_read_rejects_image_larger_than_limit(self):
+        with patch.object(main, "MAX_IMAGE_FILE_BYTES", 4):
+            Path("large.png").write_bytes(b"12345")
+            self.assertEqual(main.read("large.png"), "Error: image exceeds 4-byte limit")
+
     def test_write_creates_parent_directories(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory, "new", "file.txt")
-            self.assertEqual(main.write(str(path), "hello"), f"Wrote {path}")
-            self.assertEqual(path.read_text(encoding="utf-8"), "hello")
+        result = main.write("new/file.txt", "hello")
+        self.assertTrue(result.startswith("Wrote "))
+        self.assertTrue(result.endswith("new/file.txt"))
+        self.assertEqual(Path("new/file.txt").read_text(encoding="utf-8"), "hello")
 
     def test_edit_replaces_only_one_exact_match(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory, "file.txt")
-            path.write_text("before OLD after", encoding="utf-8")
-            self.assertEqual(main.edit(str(path), "OLD", "NEW"), f"Edited {path}")
-            self.assertEqual(path.read_text(encoding="utf-8"), "before NEW after")
+        Path("file.txt").write_text("before OLD after", encoding="utf-8")
+        result = main.edit("file.txt", "OLD", "NEW")
+        self.assertTrue(result.startswith("Edited "))
+        self.assertTrue(result.endswith("file.txt"))
+        self.assertEqual(Path("file.txt").read_text(encoding="utf-8"), "before NEW after")
 
     def test_edit_rejects_ambiguous_text_without_writing(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory, "file.txt")
-            path.write_text("OLD OLD", encoding="utf-8")
-            result = main.edit(str(path), "OLD", "NEW")
-            self.assertIn("exactly once", result)
-            self.assertEqual(path.read_text(encoding="utf-8"), "OLD OLD")
+        Path("file.txt").write_text("OLD OLD", encoding="utf-8")
+        result = main.edit("file.txt", "OLD", "NEW")
+        self.assertIn("exactly once", result)
+        self.assertEqual(Path("file.txt").read_text(encoding="utf-8"), "OLD OLD")
+
+    def test_read_rejects_path_outside_project(self):
+        with tempfile.TemporaryDirectory() as outside:
+            Path(outside, "secret.txt").write_text("secret", encoding="utf-8")
+            self.assertIn("outside the project", main.read(str(Path(outside, "secret.txt"))))
+            self.assertIn("outside the project", main.read(f"../{Path(outside).name}/secret.txt"))
+
+    @unittest.skipIf(os.name == "nt", "symlinks require privileges on Windows")
+    def test_write_rejects_symlink_escaping_project(self):
+        with tempfile.TemporaryDirectory() as outside:
+            Path("escape").symlink_to(outside, target_is_directory=True)
+            result = main.write("escape/leak.txt", "no")
+            self.assertIn("outside the project", result)
+            self.assertFalse(Path(outside, "leak.txt").exists())
 
     def test_bash_returns_combined_output(self):
         self.assertIn("hello", main.bash("python -c \"print('hello')\""))
@@ -317,13 +361,25 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(main.read("notes.txt", limit=0), "Error: limit must be at least 1")
 
     def test_tools_return_errors_for_missing_files(self):
-        missing = "/definitely-missing-k-file"
-        self.assertTrue(main.read(missing).startswith("Error: cannot read"))
-        self.assertTrue(main.edit(missing, "old", "new").startswith("Error: cannot edit"))
+        self.assertTrue(main.read("definitely-missing-k-file.txt").startswith("Error: cannot read"))
+        self.assertTrue(main.edit("definitely-missing-k-file.txt", "old", "new").startswith("Error: cannot edit"))
 
     def test_bash_timeout_returns_error_message(self):
-        result = main.bash("sleep 60", timeout=0)
+        with patch.object(main.subprocess, "run", side_effect=main.subprocess.TimeoutExpired("cmd", 1)):
+            result = main.bash("sleep 60", timeout=1)
         self.assertTrue(result.startswith("Error: command timed out"))
+
+    def test_bash_uses_default_timeout(self):
+        with patch.object(main.subprocess, "run") as run:
+            run.return_value = SimpleNamespace(returncode=0, stdout="")
+            main.bash("echo hi")
+        self.assertEqual(run.call_args.kwargs["timeout"], main.DEFAULT_BASH_TIMEOUT)
+
+    def test_bash_rejects_invalid_timeout_before_running(self):
+        with patch.object(main.subprocess, "run") as run:
+            result = main.bash("echo hi", timeout=0)
+        run.assert_not_called()
+        self.assertIn("timeout must be between 1 and", result)
 
     def test_bash_oserror_returns_error_message(self):
         with patch.object(main.subprocess, "run", side_effect=OSError("broken")):
@@ -332,7 +388,8 @@ class ToolTests(unittest.TestCase):
         self.assertIn("broken", result)
 
     def test_write_returns_error_for_unwritable_path(self):
-        result = main.write("/nonexistent-dir-12345/file.txt", "content")
+        Path("blocker.txt").write_text("block", encoding="utf-8")
+        result = main.write("blocker.txt/sub/file.txt", "content")
         self.assertTrue(result.startswith("Error: cannot write"))
 
     def test_dispatch_tool_catches_handler_exception(self):
@@ -349,56 +406,19 @@ class ToolTests(unittest.TestCase):
             result = main.dispatch_tool("list_tool", "{}", "call-1")
         self.assertEqual(result["output"], [{"type": "input_image", "image_url": "data:img"}])
 
-    def test_is_dangerous_bash_limits_the_protected_set(self):
-        for command in ("rm -rf build", "rm -fr build", "git reset --hard", "git clean -fd", "git push origin main --force"):
-            self.assertTrue(main.is_dangerous_bash(command))
-        for command in (
-            "rm file.txt",
-            "rm --preserve-root --one-file-system build",
-            "git reset --soft HEAD~1",
-            "git push origin main",
-            "git push --follow-tags",
-        ):
-            self.assertFalse(main.is_dangerous_bash(command))
-
-    def test_is_dangerous_bash_recognizes_protected_commands_in_shell_compounds(self):
-        for command in ("cd repo && rm -rf build", "cd repo && git reset --hard", "echo safe; git clean -fd", "true || git push --force"):
+    def test_dispatch_requires_confirmation_for_every_bash_command(self):
+        for command in ("echo ok", "rm -r tmp", "git push --force=origin main", "find . -delete"):
             with self.subTest(command=command):
-                self.assertTrue(main.is_dangerous_bash(command))
-        for command in ("echo 'rm -rf build'", "printf '%s' 'git reset --hard'", "echo rm -rf build && true"):
-            with self.subTest(command=command):
-                self.assertFalse(main.is_dangerous_bash(command))
+                result = main.dispatch_tool("bash", json.dumps({"command": command}), "call")
+                self.assertEqual(result["output"], "Error: bash command rejected by user")
 
-    def test_is_dangerous_bash_requires_confirmation_for_wrapped_protected_commands(self):
-        for command in (
-            "env rm -rf tmp",
-            "command rm -rf tmp",
-            "/bin/rm -rf tmp",
-            "git -C . reset --hard",
-            "sh -c 'rm -rf tmp'",
-            "sudo rm -rf tmp",
-            "PATH=/bin rm -rf tmp",
-            "exec rm -rf tmp",
-            "nice rm -rf tmp",
-            "nohup rm -rf tmp",
-            "env PATH=/bin rm -rf tmp",
-            "nice -n 5 rm -rf tmp",
-            "exec -a x rm -rf tmp",
-        ):
-            with self.subTest(command=command):
-                self.assertTrue(main.is_dangerous_bash(command))
+    def test_dispatch_rejects_bash_when_callback_declines(self):
+        result = main.dispatch_tool("bash", json.dumps({"command": "echo hi"}), "call", confirm_bash=lambda _: False)
+        self.assertEqual(result["output"], "Error: bash command rejected by user")
 
-    def test_is_dangerous_bash_keeps_harmless_wrapped_commands_unconfirmed(self):
-        for command in ("PATH=/bin echo hi", "nice echo hi", "nohup echo hi", "command echo hi"):
-            with self.subTest(command=command):
-                self.assertFalse(main.is_dangerous_bash(command))
-
-    def test_dispatch_rejects_indirect_dangerous_bash_without_confirmation(self):
-        handler = Mock()
-        with patch.dict(main.TOOL_HANDLERS, {"bash": handler}):
-            result = main.dispatch_tool("bash", '{"command":"env rm -rf tmp"}', "call-1")
-        self.assertIn("rejected", result["output"])
-        handler.assert_not_called()
+    def test_dispatch_runs_bash_only_after_confirmation(self):
+        result = main.dispatch_tool("bash", json.dumps({"command": "printf ok"}), "call", confirm_bash=lambda command: command == "printf ok")
+        self.assertEqual(result["output"], "ok")
 
     def test_dispatch_reports_activity_immediately_before_the_handler(self):
         events = []
@@ -411,26 +431,6 @@ class ToolTests(unittest.TestCase):
             main.dispatch_tool("read", '{"path":"note.txt"}', "call-1", on_activity=events.append)
 
         self.assertEqual(events, ["read", "handler"])
-
-    def test_dispatch_requires_confirmation_before_dangerous_bash(self):
-        handler = Mock()
-        with patch.dict(main.TOOL_HANDLERS, {"bash": handler}):
-            result = main.dispatch_tool("bash", '{"command":"cd repo && rm -rf build"}', "call-1", confirm_dangerous=lambda _: False)
-        self.assertIn("rejected", result["output"])
-        handler.assert_not_called()
-
-    def test_dispatch_rejects_dangerous_bash_without_a_confirmation_callback(self):
-        handler = Mock()
-        with patch.dict(main.TOOL_HANDLERS, {"bash": handler}):
-            result = main.dispatch_tool("bash", '{"command":"git reset --hard"}', "call-1")
-        self.assertIn("rejected", result["output"])
-        handler.assert_not_called()
-
-    def test_dispatch_runs_dangerous_bash_after_confirmation(self):
-        handler = Mock(return_value="done")
-        with patch.dict(main.TOOL_HANDLERS, {"bash": handler}):
-            main.dispatch_tool("bash", '{"command":"git reset --hard"}', "call-1", confirm_dangerous=lambda _: True)
-        handler.assert_called_once_with(command="git reset --hard")
 
 
 class AgentTests(unittest.TestCase):
@@ -462,7 +462,7 @@ class AgentTests(unittest.TestCase):
         client = SimpleNamespace(responses=SimpleNamespace(create=Mock(side_effect=[first, second])))
 
         with patch.object(main, "bash", return_value="hello"):
-            main.run_agent("say hello", client, model="provider/model-x")
+            main.run_agent("say hello", client, model="provider/model-x", confirm_bash=lambda _: True)
 
         first_call = client.responses.create.call_args_list[0]
         self.assertEqual(first_call.kwargs["model"], "provider/model-x")
@@ -497,9 +497,66 @@ class AgentTests(unittest.TestCase):
             return "bash"
 
         with patch.dict(main.TOOL_HANDLERS, {"read": read_handler, "bash": bash_handler}):
-            main.run_agent("go", client, on_activity=events.append)
+            main.run_agent("go", client, on_activity=events.append, confirm_bash=lambda _: True)
 
         self.assertEqual(events, ["thinking", "read", "read handler", "bash", "bash handler", "thinking"])
+
+    def test_responses_agent_stops_after_max_tool_turns(self):
+        call = SimpleNamespace(type="function_call", name="bash", arguments='{"command": "echo ok"}', call_id="call-1")
+        response = SimpleNamespace(output=[call], output_text="", usage=None)
+        client = SimpleNamespace(responses=SimpleNamespace(create=Mock(return_value=response)))
+        with patch.dict(main.TOOL_HANDLERS, {"bash": Mock(return_value="ok")}):
+            with self.assertRaisesRegex(RuntimeError, "agent exceeded 20 tool turns"):
+                main.run_agent("go", client)
+        self.assertEqual(client.responses.create.call_count, 21)
+
+    def test_chat_agent_stops_after_max_tool_turns(self):
+        call = SimpleNamespace(id="call-1", function=SimpleNamespace(name="bash", arguments='{"command": "echo ok"}'))
+        message = SimpleNamespace(content=None, tool_calls=[call])
+        response = SimpleNamespace(choices=[SimpleNamespace(message=message)], usage=None)
+        client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=Mock(return_value=response))))
+        with patch.dict(main.TOOL_HANDLERS, {"bash": Mock(return_value="ok")}), patch.object(main, "API_MODE", "chat-completions"):
+            with self.assertRaisesRegex(RuntimeError, "agent exceeded 20 tool turns"):
+                main.run_agent("go", client)
+        self.assertEqual(client.chat.completions.create.call_count, 21)
+
+    def test_responses_agent_trims_history_before_request(self):
+        response = SimpleNamespace(output=[], output_text="Done", usage=None)
+        client = SimpleNamespace(responses=SimpleNamespace(create=Mock(return_value=response)))
+        history = [{"role": "user", "content": f"msg {i}"} for i in range(201)]
+        main.run_agent("next", client, history)
+        sent = client.responses.create.call_args.kwargs["input"]
+        self.assertEqual(len(sent), 200)
+        self.assertEqual(sent[0], {"role": "user", "content": "msg 2"})
+        self.assertEqual(sent[-1], {"role": "user", "content": "next"})
+
+    def test_chat_agent_trims_history_to_limit(self):
+        message = SimpleNamespace(content="Done", tool_calls=[])
+        response = SimpleNamespace(choices=[SimpleNamespace(message=message)], usage=None)
+        client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=Mock(return_value=response))))
+        history = [{"role": "user", "content": f"msg {i}"} for i in range(201)]
+        with patch.object(main, "API_MODE", "chat-completions"):
+            main.run_agent("next", client, history)
+        messages = client.chat.completions.create.call_args.kwargs["messages"]
+        self.assertEqual(len(messages), 201)
+        self.assertEqual(messages[1], {"role": "user", "content": "msg 2"})
+        self.assertEqual(messages[-1], {"role": "user", "content": "next"})
+
+    def test_chat_agent_trims_history_and_drops_orphan_tool_message(self):
+        message = SimpleNamespace(content="Done", tool_calls=[])
+        response = SimpleNamespace(choices=[SimpleNamespace(message=message)], usage=None)
+        client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=Mock(return_value=response))))
+        history = []
+        for i in range(67):
+            history.append({"role": "user", "content": f"u{i}"})
+            history.append({"role": "assistant", "content": f"a{i}", "tool_calls": [{"id": f"c{i}"}]})
+            history.append({"role": "tool", "tool_call_id": f"c{i}", "content": "r"})
+        with patch.object(main, "API_MODE", "chat-completions"):
+            main.run_agent("go", client, history)
+        messages = client.chat.completions.create.call_args.kwargs["messages"]
+        self.assertEqual(len(messages), 200)
+        self.assertEqual(messages[1], {"role": "user", "content": "u1"})
+        self.assertNotEqual(messages[1].get("role"), "tool")
 
     def test_compact_output_keeps_short_text(self):
         self.assertEqual(main.compact_output("short", "bash", "s1"), "short")
@@ -531,7 +588,7 @@ class AgentTests(unittest.TestCase):
         client = SimpleNamespace(responses=SimpleNamespace(create=Mock(side_effect=[first, second])))
 
         with patch.object(main, "bash", return_value="hello"):
-            self.assertEqual(main.run_agent("say hello", client)[:3], ("Done", 21, 9))
+            self.assertEqual(main.run_agent("say hello", client, confirm_bash=lambda _: True)[:3], ("Done", 21, 9))
 
         first_call, second_call = client.responses.create.call_args_list
         self.assertEqual(first_call.kwargs["model"], main.MODEL)
@@ -551,7 +608,7 @@ class AgentTests(unittest.TestCase):
         client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=Mock(side_effect=[first, second]))))
 
         with patch.object(main, "API_MODE", "chat-completions"), patch.dict(main.TOOL_HANDLERS, {"bash": Mock(return_value="hello")}):
-            result = main.run_agent("say hello", client)
+            result = main.run_agent("say hello", client, confirm_bash=lambda _: True)
         self.assertEqual(result[:3], ("Done", 21, 9))
         self.assertNotIn("tool_calls", result[3][-1])
 
@@ -948,7 +1005,7 @@ class AgentTests(unittest.TestCase):
             main.main()
         self.assertIsNone(save.call_args.args[0]["undo"])
 
-    def test_main_rejects_dangerous_command_without_tty_confirmation(self):
+    def test_main_rejects_bash_without_tty_confirmation(self):
         call = SimpleNamespace(type="function_call", name="bash", arguments='{"command": "rm -rf build"}', call_id="call-1")
         call.to_dict = lambda: {"type": "function_call", "name": "bash", "arguments": '{"command": "rm -rf build"}', "call_id": "call-1"}
         first = SimpleNamespace(id="resp-1", output=[call], output_text="", usage=None)
@@ -1086,7 +1143,7 @@ class AgentTests(unittest.TestCase):
     def test_load_session_rejects_invalid_json(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(main.Path, "home", return_value=Path(directory)):
             path = Path(directory) / ".k" / "sessions" / "bad.json"
-            path.parent.mkdir(parents=True)
+            path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("{", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "cannot load session"):
                 main.load_session("bad")
