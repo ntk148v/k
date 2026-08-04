@@ -320,6 +320,7 @@ PALETTES = {
         "muted": "#6c6c6c",
         "tool": "#547da7",
         "error": "#aa5555",
+        "info": "#4f8f4f",
         "heading": "#9a7326",
         "code": "#5a8080",
         "code_block": "#588458",
@@ -331,6 +332,7 @@ PALETTES = {
         "muted": "#808080",
         "tool": "#5f87ff",
         "error": "#cc6666",
+        "info": "#7fd787",
         "heading": "#f0c674",
         "code": "#8abeb7",
         "code_block": "#b5bd68",
@@ -699,6 +701,11 @@ def render(kind: str, text: str) -> None:
             sys.stdout.write(f"{color('error')}{text}{RESET}\n")
         else:
             sys.stdout.write(f"{text}\n")
+    elif kind == "info":
+        if is_tty:
+            sys.stdout.write(f"{color('info')}{text}{RESET}\n")
+        else:
+            sys.stdout.write(f"{text}\n")
     elif kind == "status":
         if is_tty:
             lines = [
@@ -781,7 +788,7 @@ def run_agent(
 ) -> tuple[str, int, int | None, list[object]]:
     instructions, missing = skill_instructions(skills or [])
     for name in missing:
-        render("output", f"Warning: skill '{name}' not found, skipping")
+        render("info", f"Warning: skill '{name}' not found, skipping")
     if API_MODE == "responses":
         return run_responses_agent(task, client, instructions, history, session_id, model=model, confirm_dangerous=confirm_dangerous, on_activity=on_activity)
     if API_MODE == "chat-completions":
@@ -947,7 +954,7 @@ def main() -> None:
                 return
             skill_result = handle_skill_command(task, session)
             if skill_result:
-                render("output", skill_result)
+                render("info" if not skill_result.startswith(("Invalid", "Unknown")) else "output", skill_result)
                 save_session(session)
                 render_pinned_status(status_line("?", None, session["model"]))
                 continue
@@ -958,7 +965,7 @@ def main() -> None:
                 command = parts[0]
                 if command == "/resume":
                     if len(parts) == 1:
-                        render("output", format_session_list(list_sessions()))
+                        render("info", format_session_list(list_sessions()))
                     elif len(parts) == 2:
                         try:
                             resumed = load_session(parts[1])
@@ -970,7 +977,7 @@ def main() -> None:
                             session = resumed
                             session["cwd"] = str(Path.cwd())
                             save_session(session)
-                            render("output", f"Resumed {session['id']}")
+                            render("info", f"Resumed {session['id']}")
                             render_pinned_status(status_line("?", None, session["model"]))
                     else:
                         render("output", "Usage: /resume [session-id]")
@@ -982,7 +989,7 @@ def main() -> None:
                     else:
                         session["model"] = model
                         save_session(session)
-                        render("output", f"Model set to {model}")
+                        render("info", f"Model set to {model}")
                         render_pinned_status(status_line("?", None, session["model"]))
                     continue
                 if task == "/undo":
@@ -990,7 +997,9 @@ def main() -> None:
                     if result == "Undo complete.":
                         session["undo"] = None
                         save_session(session)
-                    render("output", result)
+                        render("info", result)
+                    else:
+                        render("output", result)
                     render_pinned_status(status_line("?", None, session["model"]))
                     continue
                 render("output", f"Unknown command: {command}")
@@ -1024,7 +1033,7 @@ def main() -> None:
     finally:
         restore_terminal()
         save_session(session)
-        render("output", f"To resume this session: {sys.argv[0]} --resume {session['id']}")
+        render("info", f"To resume this session: {sys.argv[0]} --resume {session['id']}")
 
 
 if __name__ == "__main__":

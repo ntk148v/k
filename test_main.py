@@ -706,6 +706,16 @@ class AgentTests(unittest.TestCase):
             main.render("output", "Error: something went wrong")
         self.assertEqual(output.getvalue(), "\033[38;2;170;85;85mError: something went wrong\033[0m\n")
 
+    def test_render_info_uses_green(self):
+        with patch("sys.stdout", new_callable=io.StringIO) as output, patch.object(output, "isatty", return_value=True):
+            main.render("info", "Undo complete.")
+        self.assertEqual(output.getvalue(), "\033[38;2;79;143;79mUndo complete.\033[0m\n")
+
+    def test_render_info_plain_when_not_a_tty(self):
+        with patch("sys.stdout", new_callable=io.StringIO) as output, patch.object(output, "isatty", return_value=False):
+            main.render("info", "Undo complete.")
+        self.assertEqual(output.getvalue(), "Undo complete.\n")
+
     def test_render_answer_uses_default_terminal_foreground(self):
         with patch("sys.stdout", new_callable=io.StringIO) as output, patch.object(output, "isatty", return_value=True):
             main.render("answer", "plain text")
@@ -825,7 +835,7 @@ class AgentTests(unittest.TestCase):
         ):
             main.main()
         self.assertIn(
-            ("output", "To resume this session: ./launch-k --resume resume-id"),
+            ("info", "To resume this session: ./launch-k --resume resume-id"),
             [call.args for call in render.call_args_list],
         )
 
@@ -842,7 +852,7 @@ class AgentTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "boom"):
                 main.main()
         self.assertIn(
-            ("output", "To resume this session: ./launch-k --resume resume-id"),
+            ("info", "To resume this session: ./launch-k --resume resume-id"),
             [call.args for call in render.call_args_list],
         )
 
@@ -885,7 +895,7 @@ class AgentTests(unittest.TestCase):
             patch.object(main, "render") as render,
         ):
             main.main()
-        self.assertIn(("output", main.format_session_list(sessions)), [call.args for call in render.call_args_list])
+        self.assertIn(("info", main.format_session_list(sessions)), [call.args for call in render.call_args_list])
         agent.assert_not_called()
 
     def test_main_switches_session_for_resume_id(self):
@@ -902,7 +912,7 @@ class AgentTests(unittest.TestCase):
             main.main()
         self.assertEqual(save.call_args.args[0]["id"], "saved-id")
         self.assertEqual(save.call_args.args[0]["cwd"], str(Path.cwd()))
-        self.assertIn(("output", "Resumed saved-id"), [call.args for call in render.call_args_list])
+        self.assertIn(("info", "Resumed saved-id"), [call.args for call in render.call_args_list])
         self.assertTrue(any("model: provider/model-x" in call.args[0] for call in status.call_args_list))
 
     def test_main_sets_and_persists_session_model(self):
