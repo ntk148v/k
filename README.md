@@ -32,6 +32,13 @@
 - **Tool loop.** `read`, `write`, `edit`, `bash` — the four operations that cover most coding tasks.
 - **Context-mode compaction.** Large tool outputs are truncated to a useful head/tail preview; the full text is saved to disk alongside the session.
 - **Session persistence.** Every conversation is saved to `~/.k/sessions/<id>.json`. Resume any session by ID.
+- **Session discovery.** `/resume` lists up to 20 recent sessions; `/resume <id>` switches to one.
+- **Session metadata.** Saved sessions include a title from the first prompt, model, cwd, and update time.
+- **Session models.** `/model <model-name>` sets and persists the active session's model.
+- **Activity status.** The pinned status temporarily shows `thinking` and tool activity labels.
+- **Project-bound file tools.** `read`, `write`, and `edit` only touch files inside the current working directory, including symlink escapes.
+- **Explicit shell consent.** Every `bash` command requires interactive per-command approval; noninteractive runs reject all shell commands.
+- **One-turn Git undo.** `/undo` reverts the last completed agent turn from a clean worktree.
 - **Skills.** Load Markdown skill files from `~/.agents/skills/` to inject system instructions dynamically.
 - **Terminal UI.** Pi-inspired truecolor light/dark themes, pinned status line (showing model, tokens, git branch, cwd), colored Markdown rendering, multiline prompts.
 - **Portable.** Works with OpenAI-compatible providers that support either Responses or Chat Completions — OpenAI, OpenRouter, xAI, local LLMs, and OpenCode Zen.
@@ -102,25 +109,29 @@ Skills are Markdown files in `~/.agents/skills/<name>/SKILL.md`. They act as add
 
 **In-session commands:**
 
-| Command         | Action                        |
-| --------------- | ----------------------------- |
-| `/skills`       | List available skills         |
-| `/skill <name>` | Load a skill for this session |
-| `/skill clear`  | Remove all loaded skills      |
+| Command               | Action                                                       |
+| --------------------- | ------------------------------------------------------------ |
+| `/resume`             | List up to 20 recent sessions                                |
+| `/resume <id>`        | Switch to a saved session                                    |
+| `/model <model-name>` | Set and persist this session's model                         |
+| `/undo`               | Revert the last completed agent turn in a clean Git worktree |
+| `/skills`             | List available skills                                        |
+| `/skill <name>`       | Load a skill for this session                                |
+| `/skill clear`        | Remove all loaded skills                                     |
 
 ### Resuming Sessions
 
-Sessions are saved automatically after every completed answer. Find the session ID with:
-
-```bash
-ls ~/.k/sessions/
-```
-
-Resume with:
+Sessions are saved automatically after every completed answer. Use `/resume` to list up to 20 recent sessions; each entry shows its title, model, cwd, and update time. The title comes from the first prompt. Use `/resume <id>` to switch sessions, or resume at launch with:
 
 ```bash
 uv run python main.py --resume <session-id>
 ```
+
+Use `/model <model-name>` to change and persist the active session's model. While the agent works, the pinned status temporarily shows `thinking` and the active tool name.
+
+**Safety:** The `read`, `write`, and `edit` tools resolve every path against the current working directory and reject anything outside it, including symlink escapes. `bash` is not sandboxed, so every shell command requires interactive per-command approval (`Allow bash command? [y/N]`), and noninteractive runs reject all shell commands. K is not a container or OS sandbox — run it only in environments you trust.
+
+**Undo:** `/undo` works once, only after a task that began with a clean Git worktree. It preserves pre-existing files and declines if anything changed since the task.
 
 ### Themes
 
@@ -157,13 +168,25 @@ When a tool call returns more than 12,000 characters, `k` truncates it to a 6,00
 Full output saved: ~/.k/sessions/<id>-artifacts/bash-142530-abc123.txt
 ```
 
-The full output is always saved to an artifact file next to the session. You can re-read it with `read` if the model needs the full content.
+The full output is always saved to an artifact file next to the session, so nothing is lost even though the model only sees the preview.
+
+### Limits
+
+| Boundary                 | Limit                             |
+| ------------------------ | --------------------------------- |
+| Text file read           | 1 MB (`MAX_TEXT_FILE_BYTES`)      |
+| Image read               | 5 MB (`MAX_IMAGE_FILE_BYTES`)     |
+| Shell command duration   | 60 s max (`DEFAULT_BASH_TIMEOUT`) |
+| Tool turns per prompt    | 20 (`MAX_AGENT_TOOL_TURNS`)       |
+| Retained history records | 200 (`MAX_HISTORY_ITEMS`)         |
+
+Tool output larger than 12,000 characters is still captured and written to a local artifact before it is compacted; the byte limits above only bound what the model reads.
 
 ---
 
 ## How `k` Was Built (Commit by Commit)
 
-`k` started as a 50-line experiment and grew into ~400 lines of production-ish agent. Here's the story of every meaningful commit — what was added and why.
+`k` started as a 50-line experiment and is now about 1,000 lines of deliberately small Python. This is the story of the milestones that shaped the current agent.
 
 ### 1. The Seed — Minimal Agent Loop
 
@@ -265,22 +288,56 @@ e0ec168 feat: add session skill commands
 
 Skills are Markdown files in `~/.agents/skills/<name>/SKILL.md`. They get appended to the system prompt as additional instructions. No plugin system, no DSL — just text injected into the prompt. The directory path was iterated a few times (`~/.agent/` → `~/.agents/`).
 
+### 8. Package, Provider, and Input Support
+
+```
+be3f922 feat: add chat completions provider mode
+ad5aa4c feat: add multiline input support with Ctrl+J line break binding
+83fadf7 feat: add console entry point for uvx mini-agent-k
+f3df926 fix: derive version from git tag via setuptools-scm
+```
+
+The original Responses loop became portable: `k` can now use OpenAI-compatible Chat Completions providers, installs as the `k` command, and derives releases from Git tags. Readline input history and Ctrl+J multiline prompts made the interactive loop practical for real tasks.
+
+### 9. Usable Sessions and Safer Changes
+
+```
+6fc6356 feat: add session metadata and listing helpers
+1036290 feat: support session models and activity status
+c4078cd feat: add one-turn clean-worktree undo
+33b7a2e feat: add resume model undo and activity commands
+```
+
+Sessions gained titles, timestamps, model and working-directory metadata, `/resume` discovery, and per-session `/model`. The status line reports active work. `/undo` adds a deliberately narrow escape hatch: it restores one completed turn only when the worktree started clean and has not changed since.
+
+### 10. Harden the Boundaries
+
+```
+c362899 fix: harden session safety workflow
+98da0c7 fix: confirm indirect dangerous shell commands
+b6666a4 fix: confirm wrapped dangerous shell commands
+c50cbea fix: recover invalid chat history
+c3f0f03 fix: skip empty reverse patch in /undo
+```
+
+The latest work made the small surface safer rather than broader: file tools stay inside the project (including against symlink escapes); every shell command needs interactive approval; corrupt sessions and malformed provider history are recovered safely; history, file reads, image reads, shell time, and tool turns all have explicit bounds.
+
 ### The Pattern
 
 Every feature followed the same path:
 
 1. **Add the minimum** that works (one file, no deps)
 2. **Ship it** — the simplest version first
-3. **Iterate on edges** — error handling, edge cases, UX polish
+3. **Iterate on edges** — error handling, safety, and UX polish
 4. **Document** — explain the design, not just the API
 
-No premature abstractions, no plugin system, no database, no async framework. ~400 lines total.
+No plugin system, database, async runtime, or framework: only one Python file and the dependencies needed to call the model API.
 
 ---
 
 ## Build Your Own
 
-`k` is designed as both a tool and a reference implementation. The entire agent is **one Python file** (~400 lines) — here's how to build a minimal coding agent from scratch.
+`k` is designed as both a tool and a reference implementation. The entire agent is **one Python file** (about 1,000 lines) — here's how to build a minimal coding agent from scratch.
 
 ### The Core Loop
 
@@ -437,7 +494,7 @@ def load_skills(names: list[str], base_prompt: str) -> str:
 
 - **Self-contained history vs `previous_response_id`:** `k` sends the full history on every turn. It supports both Responses and Chat Completions formats, so providers only need to implement one of those APIs.
 - **No streaming:** Blocking `responses.create()` calls keep the agent loop simple. Streaming adds complexity with no functional benefit for a tool-calling agent.
-- **One file, no framework:** The entire agent is ~400 lines. There's no plugin system, no database, no async framework. Add structure only when the file becomes hard to change.
+- **One file, no framework:** The agent remains one file (about 1,000 lines). There is no plugin system, database, or async framework. Add structure only when the file becomes hard to change.
 
 ### Your First Custom Agent (Minimal Example)
 
@@ -498,15 +555,19 @@ Usage: `python minimal_agent.py "find all python files larger than 10KB"`
 
 ## Commands
 
-| Command                     | Action                                       |
-| --------------------------- | -------------------------------------------- |
-| `/quit`                     | Exit without calling the model               |
-| `/skills`                   | List available skills in `~/.agents/skills/` |
-| `/skill <name>`             | Load a skill for this session                |
-| `/skill clear`              | Clear all loaded skills                      |
-| Ctrl+J                      | Insert a line break in the current prompt    |
-| blank prompt / EOF (Ctrl+D) | Exit cleanly                                 |
-| Ctrl+C                      | Interrupt / exit                             |
+| Command                     | Action                                                       |
+| --------------------------- | ------------------------------------------------------------ |
+| `/quit`                     | Exit without calling the model                               |
+| `/resume`                   | List up to 20 recent sessions                                |
+| `/resume <id>`              | Switch to a saved session                                    |
+| `/model <model-name>`       | Set and persist this session's model                         |
+| `/undo`                     | Revert the last completed agent turn in a clean Git worktree |
+| `/skills`                   | List available skills in `~/.agents/skills/`                 |
+| `/skill <name>`             | Load a skill for this session                                |
+| `/skill clear`              | Clear all loaded skills                                      |
+| Ctrl+J                      | Insert a line break in the current prompt                    |
+| blank prompt / EOF (Ctrl+D) | Exit cleanly                                                 |
+| Ctrl+C                      | Interrupt / exit                                             |
 
 ## Reference
 
@@ -514,13 +575,24 @@ Usage: `python minimal_agent.py "find all python files larger than 10KB"`
 
 ```
 k/
-├── main.py              # ~400 lines, the entire agent
-├── test_main.py         # pytest test suite
+├── main.py              # the entire agent
+├── test_main.py         # unittest test suite
 ├── pyproject.toml       # uv/pip project config
 ├── assets/
 │   ├── agentk.jpg       # banner image
 │   └── k-demo.gif       # demo animation
 └── .env                 # OPENAI_API_KEY (not committed)
+```
+
+### Development
+
+Run the full verification suite (this is what CI enforces):
+
+```bash
+uv sync --extra dev --locked
+uv run ruff check main.py test_main.py
+uv run python -m unittest -v
+uv build
 ```
 
 ### Environment Variables

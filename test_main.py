@@ -1,5 +1,7 @@
 import io
 import json
+import os
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -39,7 +41,7 @@ class IdentityTests(unittest.TestCase):
     def test_load_session_rejects_non_dict_json(self):
         with tempfile.TemporaryDirectory() as d, patch.object(main.Path, "home", return_value=Path(d)):
             path = main.session_path("arr")
-            path.parent.mkdir(parents=True)
+            path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("[]", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "expected an object"):
                 main.load_session("arr")
@@ -60,6 +62,25 @@ class IdentityTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "invalid session data"):
                         main.load_session(session_id)
 
+    def test_load_session_rejects_present_optional_metadata_with_invalid_types(self):
+        invalid_metadata = {
+            "model": None,
+            "title": 1,
+            "cwd": [],
+            "created_at": {},
+            "updated_at": False,
+            "undo": [],
+        }
+        with tempfile.TemporaryDirectory() as directory, patch.object(main.Path, "home", return_value=Path(directory)):
+            for field, value in invalid_metadata.items():
+                with self.subTest(field=field):
+                    session = {"id": field, "history": [], "transcript": [], field: value}
+                    path = main.session_path(field)
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(json.dumps(session), encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, "invalid session data"):
+                        main.load_session(field)
+
     def test_load_session_reports_oserror(self):
         with patch.object(main.Path, "home", return_value=Path("/nonexistent-k-dir-for-testing")):
             with self.assertRaisesRegex(ValueError, "cannot load session"):
@@ -69,13 +90,108 @@ class IdentityTests(unittest.TestCase):
         with patch.object(main.subprocess, "run", side_effect=OSError("no git")):
             self.assertIsNone(main.git_branch())
 
+    def git(self, root: Path, *args: str) -> str:
+        result = main.subprocess.run(
+            ["git", *args],
+            cwd=root,
+            text=True,
+            stdout=main.subprocess.PIPE,
+            stderr=main.subprocess.PIPE,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout
+
+    def init_git_repo(self, directory: str) -> Path:
+        root = Path(directory)
+        self.git(root, "init", "-q")
+        self.git(root, "config", "user.email", "k@example.test")
+        self.git(root, "config", "user.name", "k")
+        (root / "note.txt").write_text("before\n", encoding="utf-8")
+        self.git(root, "add", "note.txt")
+        self.git(root, "commit", "-qm", "init")
+        return root
+
+    def test_undo_checkpoint_is_unavailable_when_worktree_is_dirty(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.init_git_repo(directory)
+            (root / "note.txt").write_text("changed\n", encoding="utf-8")
+            previous = Path.cwd()
+            try:
+                os.chdir(root)
+                self.assertIsNone(main.begin_undo_checkpoint())
+            finally:
+                os.chdir(previous)
+
+    def test_apply_undo_reverses_tracked_edit_and_removes_new_untracked_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.init_git_repo(directory)
+            previous = Path.cwd()
+            try:
+                os.chdir(root)
+                checkpoint = main.begin_undo_checkpoint()
+                (root / "note.txt").write_text("after\n", encoding="utf-8")
+                (root / "new.txt").write_text("new\n", encoding="utf-8")
+                record = main.finish_undo_checkpoint(checkpoint)
+                self.assertEqual(main.apply_undo(record), "Undo complete.")
+                self.assertEqual((root / "note.txt").read_text(encoding="utf-8"), "before\n")
+                self.assertFalse((root / "new.txt").exists())
+                self.assertEqual(self.git(root, "status", "--porcelain"), "")
+            finally:
+                os.chdir(previous)
+
+    def test_apply_undo_removes_untracked_file_with_no_tracked_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.init_git_repo(directory)
+            previous = Path.cwd()
+            try:
+                os.chdir(root)
+                checkpoint = main.begin_undo_checkpoint()
+                (root / "file.txt").write_text("dmvt dmfpt\n", encoding="utf-8")
+                record = main.finish_undo_checkpoint(checkpoint)
+                self.assertEqual(main.apply_undo(record), "Undo complete.")
+                self.assertFalse((root / "file.txt").exists())
+                self.assertEqual(self.git(root, "status", "--porcelain"), "")
+            finally:
+                os.chdir(previous)
+
+    def test_apply_undo_restores_staged_tracked_edit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.init_git_repo(directory)
+            previous = Path.cwd()
+            try:
+                os.chdir(root)
+                checkpoint = main.begin_undo_checkpoint()
+                (root / "note.txt").write_text("after\n", encoding="utf-8")
+                self.git(root, "add", "note.txt")
+                record = main.finish_undo_checkpoint(checkpoint)
+                self.assertEqual(main.apply_undo(record), "Undo complete.")
+                self.assertEqual((root / "note.txt").read_text(encoding="utf-8"), "before\n")
+                self.assertEqual(self.git(root, "status", "--porcelain"), "")
+            finally:
+                os.chdir(previous)
+
+    def test_apply_undo_refuses_when_worktree_changed_after_turn(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.init_git_repo(directory)
+            previous = Path.cwd()
+            try:
+                os.chdir(root)
+                checkpoint = main.begin_undo_checkpoint()
+                (root / "note.txt").write_text("after\n", encoding="utf-8")
+                record = main.finish_undo_checkpoint(checkpoint)
+                (root / "later.txt").write_text("later\n", encoding="utf-8")
+                self.assertIn("worktree changed", main.apply_undo(record))
+                self.assertEqual((root / "note.txt").read_text(encoding="utf-8"), "after\n")
+                self.assertEqual((root / "later.txt").read_text(encoding="utf-8"), "later\n")
+            finally:
+                os.chdir(previous)
+
     def test_format_markdown_handles_empty_string(self):
         self.assertEqual(main.format_markdown(""), "")
 
     def test_restore_terminal_does_nothing_when_not_a_tty(self):
-        with patch("sys.stdout", new_callable=io.StringIO) as output, patch.object(
-            output, "isatty", return_value=False
-        ):
+        with patch("sys.stdout", new_callable=io.StringIO) as output, patch.object(output, "isatty", return_value=False):
             main.restore_terminal()
         self.assertEqual(output.getvalue(), "")
 
@@ -96,6 +212,73 @@ class IdentityTests(unittest.TestCase):
         main.set_theme("light")
         self.assertIn("\033[38;2;90;128;128m", main.color("accent"))
 
+    def test_load_session_adds_defaults_for_old_valid_session(self):
+        with tempfile.TemporaryDirectory() as d, patch.object(main.Path, "home", return_value=Path(d)):
+            session = {"id": "oldie", "history": [], "transcript": []}
+            main.save_session(session)
+            loaded = main.load_session("oldie")
+        self.assertEqual(loaded["model"], main.MODEL)
+        self.assertEqual(loaded["skills"], [])
+        self.assertEqual(loaded["title"], "")
+        self.assertEqual(loaded["cwd"], str(Path.cwd()))
+        self.assertIsNone(loaded["undo"])
+
+    def test_save_session_sets_created_and_updated_metadata(self):
+        with tempfile.TemporaryDirectory() as d, patch.object(main.Path, "home", return_value=Path(d)):
+            session = {"id": "abc123", "history": [], "transcript": []}
+            main.save_session(session)
+            saved = main.load_session("abc123")
+        self.assertRegex(saved["created_at"], r"^\d{4}-\d{2}-\d{2}T")
+        self.assertRegex(saved["updated_at"], r"^\d{4}-\d{2}-\d{2}T")
+        self.assertEqual(saved["cwd"], str(Path.cwd()))
+        self.assertEqual(saved["model"], main.MODEL)
+
+    @unittest.skipIf(os.name == "nt", "POSIX permissions do not apply on Windows")
+    def test_save_session_uses_owner_only_permissions(self):
+        with tempfile.TemporaryDirectory() as home, patch.object(main.Path, "home", return_value=Path(home)):
+            session = {"id": "session", "history": [], "transcript": []}
+            main.save_session(session)
+            path = main.session_path("session")
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
+
+    def test_save_session_twice_is_valid_json(self):
+        with tempfile.TemporaryDirectory() as home, patch.object(main.Path, "home", return_value=Path(home)):
+            session = {"id": "twice", "history": [], "transcript": []}
+            main.save_session(session)
+            main.save_session(session)
+            self.assertEqual(main.load_session("twice")["id"], "twice")
+
+    def test_list_sessions_is_newest_first_and_skips_invalid_files(self):
+        with tempfile.TemporaryDirectory() as d, patch.object(main.Path, "home", return_value=Path(d)):
+            early = {"id": "early", "history": [], "transcript": [], "updated_at": "2026-07-30T10:00:00+00:00"}
+            later = {"id": "later", "history": [], "transcript": [], "updated_at": "2026-07-30T12:00:00+00:00"}
+            for session in (later, early):
+                path = main.session_path(session["id"])
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(session), encoding="utf-8")
+            # Make the older persisted session newer on disk.
+            (main.session_path("early")).touch()
+            # Write an invalid JSON file.
+            (main.session_path("bad")).write_text("not json", encoding="utf-8")
+            sessions = main.list_sessions()
+        self.assertEqual([s["id"] for s in sessions], ["later", "early"])
+
+    def test_format_session_list_is_compact_and_handles_empty(self):
+        self.assertEqual(main.format_session_list([]), "No saved sessions.")
+        formatted = main.format_session_list(
+            [
+                {
+                    "id": "abc123",
+                    "title": "Fix parser",
+                    "cwd": "/repo",
+                    "updated_at": "2026-07-30T12:00:00+00:00",
+                    "model": "small",
+                }
+            ]
+        )
+        self.assertIn("abc123", formatted)
+
 
 class ReadlineTests(unittest.TestCase):
     def test_readline_is_loaded_for_interactive_history(self):
@@ -108,40 +291,67 @@ class ReadlineTests(unittest.TestCase):
 
 
 class ToolTests(unittest.TestCase):
+    def setUp(self):
+        self._previous_cwd = Path.cwd()
+        self._workspace = tempfile.TemporaryDirectory()
+        os.chdir(self._workspace.name)
+
+    def tearDown(self):
+        os.chdir(self._previous_cwd)
+        self._workspace.cleanup()
+
     def test_read_respects_offset_and_limit(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory, "notes.txt")
-            path.write_text("first\nsecond\nthird\n", encoding="utf-8")
-            self.assertEqual(main.read(str(path), offset=2, limit=1), "2: second")
+        Path("notes.txt").write_text("first\nsecond\nthird\n", encoding="utf-8")
+        self.assertEqual(main.read("notes.txt", offset=2, limit=1), "2: second")
 
     def test_read_returns_an_image_attachment(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory, "pixel.png")
-            path.write_bytes(b"png-bytes")
-            result = main.read(str(path))
+        Path("pixel.png").write_bytes(b"png-bytes")
+        result = main.read("pixel.png")
         self.assertEqual(result[0]["type"], "input_image")
         self.assertTrue(result[0]["image_url"].startswith("data:image/png;base64,"))
 
+    def test_read_rejects_text_file_larger_than_limit(self):
+        with patch.object(main, "MAX_TEXT_FILE_BYTES", 4):
+            Path("large.txt").write_text("12345", encoding="utf-8")
+            self.assertEqual(main.read("large.txt"), "Error: file exceeds 4-byte limit")
+
+    def test_read_rejects_image_larger_than_limit(self):
+        with patch.object(main, "MAX_IMAGE_FILE_BYTES", 4):
+            Path("large.png").write_bytes(b"12345")
+            self.assertEqual(main.read("large.png"), "Error: image exceeds 4-byte limit")
+
     def test_write_creates_parent_directories(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory, "new", "file.txt")
-            self.assertEqual(main.write(str(path), "hello"), f"Wrote {path}")
-            self.assertEqual(path.read_text(encoding="utf-8"), "hello")
+        result = main.write("new/file.txt", "hello")
+        self.assertTrue(result.startswith("Wrote "))
+        self.assertTrue(result.endswith("new/file.txt"))
+        self.assertEqual(Path("new/file.txt").read_text(encoding="utf-8"), "hello")
 
     def test_edit_replaces_only_one_exact_match(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory, "file.txt")
-            path.write_text("before OLD after", encoding="utf-8")
-            self.assertEqual(main.edit(str(path), "OLD", "NEW"), f"Edited {path}")
-            self.assertEqual(path.read_text(encoding="utf-8"), "before NEW after")
+        Path("file.txt").write_text("before OLD after", encoding="utf-8")
+        result = main.edit("file.txt", "OLD", "NEW")
+        self.assertTrue(result.startswith("Edited "))
+        self.assertTrue(result.endswith("file.txt"))
+        self.assertEqual(Path("file.txt").read_text(encoding="utf-8"), "before NEW after")
 
     def test_edit_rejects_ambiguous_text_without_writing(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory, "file.txt")
-            path.write_text("OLD OLD", encoding="utf-8")
-            result = main.edit(str(path), "OLD", "NEW")
-            self.assertIn("exactly once", result)
-            self.assertEqual(path.read_text(encoding="utf-8"), "OLD OLD")
+        Path("file.txt").write_text("OLD OLD", encoding="utf-8")
+        result = main.edit("file.txt", "OLD", "NEW")
+        self.assertIn("exactly once", result)
+        self.assertEqual(Path("file.txt").read_text(encoding="utf-8"), "OLD OLD")
+
+    def test_read_rejects_path_outside_project(self):
+        with tempfile.TemporaryDirectory() as outside:
+            Path(outside, "secret.txt").write_text("secret", encoding="utf-8")
+            self.assertIn("outside the project", main.read(str(Path(outside, "secret.txt"))))
+            self.assertIn("outside the project", main.read(f"../{Path(outside).name}/secret.txt"))
+
+    @unittest.skipIf(os.name == "nt", "symlinks require privileges on Windows")
+    def test_write_rejects_symlink_escaping_project(self):
+        with tempfile.TemporaryDirectory() as outside:
+            Path("escape").symlink_to(outside, target_is_directory=True)
+            result = main.write("escape/leak.txt", "no")
+            self.assertIn("outside the project", result)
+            self.assertFalse(Path(outside, "leak.txt").exists())
 
     def test_bash_returns_combined_output(self):
         self.assertIn("hello", main.bash("python -c \"print('hello')\""))
@@ -151,13 +361,25 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(main.read("notes.txt", limit=0), "Error: limit must be at least 1")
 
     def test_tools_return_errors_for_missing_files(self):
-        missing = "/definitely-missing-k-file"
-        self.assertTrue(main.read(missing).startswith("Error: cannot read"))
-        self.assertTrue(main.edit(missing, "old", "new").startswith("Error: cannot edit"))
+        self.assertTrue(main.read("definitely-missing-k-file.txt").startswith("Error: cannot read"))
+        self.assertTrue(main.edit("definitely-missing-k-file.txt", "old", "new").startswith("Error: cannot edit"))
 
     def test_bash_timeout_returns_error_message(self):
-        result = main.bash("sleep 60", timeout=0)
+        with patch.object(main.subprocess, "run", side_effect=main.subprocess.TimeoutExpired("cmd", 1)):
+            result = main.bash("sleep 60", timeout=1)
         self.assertTrue(result.startswith("Error: command timed out"))
+
+    def test_bash_uses_default_timeout(self):
+        with patch.object(main.subprocess, "run") as run:
+            run.return_value = SimpleNamespace(returncode=0, stdout="")
+            main.bash("echo hi")
+        self.assertEqual(run.call_args.kwargs["timeout"], main.DEFAULT_BASH_TIMEOUT)
+
+    def test_bash_rejects_invalid_timeout_before_running(self):
+        with patch.object(main.subprocess, "run") as run:
+            result = main.bash("echo hi", timeout=0)
+        run.assert_not_called()
+        self.assertIn("timeout must be between 1 and", result)
 
     def test_bash_oserror_returns_error_message(self):
         with patch.object(main.subprocess, "run", side_effect=OSError("broken")):
@@ -166,7 +388,8 @@ class ToolTests(unittest.TestCase):
         self.assertIn("broken", result)
 
     def test_write_returns_error_for_unwritable_path(self):
-        result = main.write("/nonexistent-dir-12345/file.txt", "content")
+        Path("blocker.txt").write_text("block", encoding="utf-8")
+        result = main.write("blocker.txt/sub/file.txt", "content")
         self.assertTrue(result.startswith("Error: cannot write"))
 
     def test_dispatch_tool_catches_handler_exception(self):
@@ -183,6 +406,32 @@ class ToolTests(unittest.TestCase):
             result = main.dispatch_tool("list_tool", "{}", "call-1")
         self.assertEqual(result["output"], [{"type": "input_image", "image_url": "data:img"}])
 
+    def test_dispatch_requires_confirmation_for_every_bash_command(self):
+        for command in ("echo ok", "rm -r tmp", "git push --force=origin main", "find . -delete"):
+            with self.subTest(command=command):
+                result = main.dispatch_tool("bash", json.dumps({"command": command}), "call")
+                self.assertEqual(result["output"], "Error: bash command rejected by user")
+
+    def test_dispatch_rejects_bash_when_callback_declines(self):
+        result = main.dispatch_tool("bash", json.dumps({"command": "echo hi"}), "call", confirm_bash=lambda _: False)
+        self.assertEqual(result["output"], "Error: bash command rejected by user")
+
+    def test_dispatch_runs_bash_only_after_confirmation(self):
+        result = main.dispatch_tool("bash", json.dumps({"command": "printf ok"}), "call", confirm_bash=lambda command: command == "printf ok")
+        self.assertEqual(result["output"], "ok")
+
+    def test_dispatch_reports_activity_immediately_before_the_handler(self):
+        events = []
+
+        def handler(**kwargs):
+            events.append("handler")
+            return "ok"
+
+        with patch.dict(main.TOOL_HANDLERS, {"read": handler}):
+            main.dispatch_tool("read", '{"path":"note.txt"}', "call-1", on_activity=events.append)
+
+        self.assertEqual(events, ["read", "handler"])
+
 
 class AgentTests(unittest.TestCase):
     def setUp(self):
@@ -195,6 +444,119 @@ class AgentTests(unittest.TestCase):
     def test_dispatch_reports_bad_json_and_unknown_tools(self):
         self.assertIn("invalid JSON", main.dispatch_tool("read", "{", "call-1")["output"])
         self.assertIn("Unknown tool", main.dispatch_tool("missing", "{}", "call-2")["output"])
+
+    def test_run_agent_uses_explicit_session_model_for_responses(self):
+        call = SimpleNamespace(type="function_call", name="bash", arguments='{"command": "echo hello"}', call_id="call-1")
+        first = SimpleNamespace(
+            id="resp-1",
+            output=[call],
+            output_text="",
+            usage=SimpleNamespace(input_tokens=5, output_tokens=3),
+        )
+        second = SimpleNamespace(
+            id="resp-2",
+            output=[],
+            output_text="Done",
+            usage=SimpleNamespace(input_tokens=9, output_tokens=4),
+        )
+        client = SimpleNamespace(responses=SimpleNamespace(create=Mock(side_effect=[first, second])))
+
+        with patch.object(main, "bash", return_value="hello"):
+            main.run_agent("say hello", client, model="provider/model-x", confirm_bash=lambda _: True)
+
+        first_call = client.responses.create.call_args_list[0]
+        self.assertEqual(first_call.kwargs["model"], "provider/model-x")
+
+    def test_run_agent_uses_explicit_session_model_for_chat(self):
+        message = SimpleNamespace(content="Done", tool_calls=[])
+        response = SimpleNamespace(choices=[SimpleNamespace(message=message)], usage=SimpleNamespace(prompt_tokens=5, completion_tokens=3))
+        client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=Mock(return_value=response))))
+
+        with patch.object(main, "API_MODE", "chat-completions"):
+            main.run_agent("hello", client, model="provider/model-y")
+
+        first_call = client.chat.completions.create.call_args_list[0]
+        self.assertEqual(first_call.kwargs["model"], "provider/model-y")
+
+    def test_responses_agent_announces_each_tool_only_when_it_dispatches(self):
+        calls = [
+            SimpleNamespace(type="function_call", name="read", arguments='{"path":"a.txt"}', call_id="call-1"),
+            SimpleNamespace(type="function_call", name="bash", arguments='{"command":"echo ok"}', call_id="call-2"),
+        ]
+        first = SimpleNamespace(id="resp-1", output=calls, output_text="", usage=None)
+        second = SimpleNamespace(id="resp-2", output=[], output_text="Done", usage=None)
+        client = SimpleNamespace(responses=SimpleNamespace(create=Mock(side_effect=[first, second])))
+        events = []
+
+        def read_handler(**kwargs):
+            events.append("read handler")
+            return "read"
+
+        def bash_handler(**kwargs):
+            events.append("bash handler")
+            return "bash"
+
+        with patch.dict(main.TOOL_HANDLERS, {"read": read_handler, "bash": bash_handler}):
+            main.run_agent("go", client, on_activity=events.append, confirm_bash=lambda _: True)
+
+        self.assertEqual(events, ["thinking", "read", "read handler", "bash", "bash handler", "thinking"])
+
+    def test_responses_agent_stops_after_max_tool_turns(self):
+        call = SimpleNamespace(type="function_call", name="bash", arguments='{"command": "echo ok"}', call_id="call-1")
+        response = SimpleNamespace(output=[call], output_text="", usage=None)
+        client = SimpleNamespace(responses=SimpleNamespace(create=Mock(return_value=response)))
+        with patch.dict(main.TOOL_HANDLERS, {"bash": Mock(return_value="ok")}):
+            with self.assertRaisesRegex(RuntimeError, "agent exceeded 20 tool turns"):
+                main.run_agent("go", client)
+        self.assertEqual(client.responses.create.call_count, 21)
+
+    def test_chat_agent_stops_after_max_tool_turns(self):
+        call = SimpleNamespace(id="call-1", function=SimpleNamespace(name="bash", arguments='{"command": "echo ok"}'))
+        message = SimpleNamespace(content=None, tool_calls=[call])
+        response = SimpleNamespace(choices=[SimpleNamespace(message=message)], usage=None)
+        client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=Mock(return_value=response))))
+        with patch.dict(main.TOOL_HANDLERS, {"bash": Mock(return_value="ok")}), patch.object(main, "API_MODE", "chat-completions"):
+            with self.assertRaisesRegex(RuntimeError, "agent exceeded 20 tool turns"):
+                main.run_agent("go", client)
+        self.assertEqual(client.chat.completions.create.call_count, 21)
+
+    def test_responses_agent_trims_history_before_request(self):
+        response = SimpleNamespace(output=[], output_text="Done", usage=None)
+        client = SimpleNamespace(responses=SimpleNamespace(create=Mock(return_value=response)))
+        history = [{"role": "user", "content": f"msg {i}"} for i in range(201)]
+        main.run_agent("next", client, history)
+        sent = client.responses.create.call_args.kwargs["input"]
+        self.assertEqual(len(sent), 200)
+        self.assertEqual(sent[0], {"role": "user", "content": "msg 2"})
+        self.assertEqual(sent[-1], {"role": "user", "content": "next"})
+
+    def test_chat_agent_trims_history_to_limit(self):
+        message = SimpleNamespace(content="Done", tool_calls=[])
+        response = SimpleNamespace(choices=[SimpleNamespace(message=message)], usage=None)
+        client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=Mock(return_value=response))))
+        history = [{"role": "user", "content": f"msg {i}"} for i in range(201)]
+        with patch.object(main, "API_MODE", "chat-completions"):
+            main.run_agent("next", client, history)
+        messages = client.chat.completions.create.call_args.kwargs["messages"]
+        self.assertEqual(len(messages), 201)
+        self.assertEqual(messages[1], {"role": "user", "content": "msg 2"})
+        self.assertEqual(messages[-1], {"role": "user", "content": "next"})
+
+    def test_chat_agent_trims_history_and_drops_orphan_tool_message(self):
+        message = SimpleNamespace(content="Done", tool_calls=[])
+        response = SimpleNamespace(choices=[SimpleNamespace(message=message)], usage=None)
+        client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=Mock(return_value=response))))
+        history = []
+        for i in range(67):
+            history.append({"role": "user", "content": f"u{i}"})
+            history.append({"role": "assistant", "content": f"a{i}", "tool_calls": [{"id": f"c{i}"}]})
+            history.append({"role": "tool", "tool_call_id": f"c{i}", "content": "r"})
+        with patch.object(main, "API_MODE", "chat-completions"):
+            main.run_agent("go", client, history)
+        messages = client.chat.completions.create.call_args.kwargs["messages"]
+        self.assertEqual(len(messages), 200)
+        self.assertEqual(messages[1], {"role": "user", "content": "u1"})
+        self.assertNotEqual(messages[1].get("role"), "tool")
 
     def test_compact_output_keeps_short_text(self):
         self.assertEqual(main.compact_output("short", "bash", "s1"), "short")
@@ -212,17 +574,21 @@ class AgentTests(unittest.TestCase):
     def test_run_agent_returns_final_text_after_a_tool_call(self):
         call = SimpleNamespace(type="function_call", name="bash", arguments='{"command": "echo hello"}', call_id="call-1")
         first = SimpleNamespace(
-            id="resp-1", output=[call], output_text="",
+            id="resp-1",
+            output=[call],
+            output_text="",
             usage=SimpleNamespace(input_tokens=5, output_tokens=3),
         )
         second = SimpleNamespace(
-            id="resp-2", output=[], output_text="Done",
+            id="resp-2",
+            output=[],
+            output_text="Done",
             usage=SimpleNamespace(input_tokens=9, output_tokens=4),
         )
         client = SimpleNamespace(responses=SimpleNamespace(create=Mock(side_effect=[first, second])))
 
         with patch.object(main, "bash", return_value="hello"):
-            self.assertEqual(main.run_agent("say hello", client)[:3], ("Done", 21, 9))
+            self.assertEqual(main.run_agent("say hello", client, confirm_bash=lambda _: True)[:3], ("Done", 21, 9))
 
         first_call, second_call = client.responses.create.call_args_list
         self.assertEqual(first_call.kwargs["model"], main.MODEL)
@@ -242,7 +608,7 @@ class AgentTests(unittest.TestCase):
         client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=Mock(side_effect=[first, second]))))
 
         with patch.object(main, "API_MODE", "chat-completions"), patch.dict(main.TOOL_HANDLERS, {"bash": Mock(return_value="hello")}):
-            result = main.run_agent("say hello", client)
+            result = main.run_agent("say hello", client, confirm_bash=lambda _: True)
         self.assertEqual(result[:3], ("Done", 21, 9))
         self.assertNotIn("tool_calls", result[3][-1])
 
@@ -264,6 +630,35 @@ class AgentTests(unittest.TestCase):
         messages = client.chat.completions.create.call_args.kwargs["messages"]
         self.assertEqual(messages[1], {"role": "assistant", "content": "old reply"})
 
+    def test_chat_agent_omits_invalid_legacy_assistant_message(self):
+        message = SimpleNamespace(content="Done", tool_calls=[])
+        response = SimpleNamespace(
+            choices=[SimpleNamespace(message=message)],
+            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
+        )
+        client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=Mock(return_value=response))))
+        history = [
+            {"role": "assistant", "content": None},
+            {"role": "assistant", "content": "Earlier answer"},
+        ]
+
+        with patch.object(main, "API_MODE", "chat-completions"):
+            _, _, _, saved_history = main.run_agent("next task", client, history)
+
+        sent = client.chat.completions.create.call_args.kwargs["messages"]
+        self.assertNotIn({"role": "assistant", "content": None}, sent)
+        self.assertNotIn({"role": "assistant", "content": None}, saved_history)
+        self.assertIn({"role": "assistant", "content": "Earlier answer"}, sent)
+
+    def test_chat_agent_rejects_empty_final_provider_message(self):
+        message = SimpleNamespace(content=None, tool_calls=[])
+        response = SimpleNamespace(choices=[SimpleNamespace(message=message)], usage=None)
+        client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=Mock(return_value=response))))
+
+        with patch.object(main, "API_MODE", "chat-completions"):
+            with self.assertRaisesRegex(RuntimeError, "provider response is malformed"):
+                main.run_agent("next task", client)
+
     def test_run_agent_rejects_unknown_api_mode(self):
         with patch.object(main, "API_MODE", "unknown"):
             with self.assertRaisesRegex(RuntimeError, "K_API_MODE"):
@@ -282,9 +677,7 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(output.getvalue(), "model: openrouter/free | tokens: 21 | context: 9\n")
 
     def test_render_status_uses_light_pi_palette_in_a_tty(self):
-        with patch("sys.stdout", new_callable=io.StringIO) as output, patch.object(
-            output, "isatty", return_value=True
-        ):
+        with patch("sys.stdout", new_callable=io.StringIO) as output, patch.object(output, "isatty", return_value=True):
             main.render("status", "k | /repo | main")
         self.assertEqual(
             output.getvalue(),
@@ -318,16 +711,12 @@ class AgentTests(unittest.TestCase):
         )
 
     def test_render_pinned_status_falls_back_when_stdout_is_not_a_tty(self):
-        with patch("sys.stdout", new_callable=io.StringIO) as output, patch.object(
-            output, "isatty", return_value=False
-        ):
+        with patch("sys.stdout", new_callable=io.StringIO) as output, patch.object(output, "isatty", return_value=False):
             self.assertFalse(main.render_pinned_status("k | /repo"))
         self.assertEqual(output.getvalue(), "k | /repo\n")
 
     def test_restore_terminal_restores_the_default_scroll_region(self):
-        with patch("sys.stdout", new_callable=io.StringIO) as output, patch.object(
-            output, "isatty", return_value=True
-        ):
+        with patch("sys.stdout", new_callable=io.StringIO) as output, patch.object(output, "isatty", return_value=True):
             main.restore_terminal()
         self.assertEqual(output.getvalue(), "\033[r\033[0m\n")
 
@@ -365,30 +754,32 @@ class AgentTests(unittest.TestCase):
         )
 
     def test_render_tool_uses_bright_blue(self):
-        with patch("sys.stdout", new_callable=io.StringIO) as output, patch.object(
-            output, "isatty", return_value=True
-        ):
+        with patch("sys.stdout", new_callable=io.StringIO) as output, patch.object(output, "isatty", return_value=True):
             main.render("tool", "read file.txt")
         self.assertEqual(output.getvalue(), "  \033[38;2;84;125;167mread file.txt\033[0m\n")
 
     def test_render_error_uses_bright_red(self):
-        with patch("sys.stdout", new_callable=io.StringIO) as output, patch.object(
-            output, "isatty", return_value=True
-        ):
+        with patch("sys.stdout", new_callable=io.StringIO) as output, patch.object(output, "isatty", return_value=True):
             main.render("output", "Error: something went wrong")
         self.assertEqual(output.getvalue(), "\033[38;2;170;85;85mError: something went wrong\033[0m\n")
 
+    def test_render_info_uses_green(self):
+        with patch("sys.stdout", new_callable=io.StringIO) as output, patch.object(output, "isatty", return_value=True):
+            main.render("info", "Undo complete.")
+        self.assertEqual(output.getvalue(), "\033[38;2;79;143;79mUndo complete.\033[0m\n")
+
+    def test_render_info_plain_when_not_a_tty(self):
+        with patch("sys.stdout", new_callable=io.StringIO) as output, patch.object(output, "isatty", return_value=False):
+            main.render("info", "Undo complete.")
+        self.assertEqual(output.getvalue(), "Undo complete.\n")
+
     def test_render_answer_uses_default_terminal_foreground(self):
-        with patch("sys.stdout", new_callable=io.StringIO) as output, patch.object(
-            output, "isatty", return_value=True
-        ):
+        with patch("sys.stdout", new_callable=io.StringIO) as output, patch.object(output, "isatty", return_value=True):
             main.render("answer", "plain text")
         self.assertEqual(output.getvalue(), "\033[38;2;31;35;40mplain text\033[0m\n")
 
     def test_render_answer_plain_when_not_a_tty(self):
-        with patch("sys.stdout", new_callable=io.StringIO) as output, patch.object(
-            output, "isatty", return_value=False
-        ):
+        with patch("sys.stdout", new_callable=io.StringIO) as output, patch.object(output, "isatty", return_value=False):
             main.render("answer", "# Title")
         self.assertEqual(output.getvalue(), "# Title\n")
 
@@ -452,6 +843,11 @@ class AgentTests(unittest.TestCase):
         self.assertNotIn("branch:", line)
         self.assertIn("context: ?", line)
 
+    def test_status_line_uses_passed_model_and_activity(self):
+        line = main.status_line(21, 9, "provider/model-x", "thinking")
+        self.assertIn("model: provider/model-x", line)
+        self.assertIn("thinking", line)
+
     def test_main_uses_pinned_status_and_the_new_prompt(self):
         with (
             patch("builtins.input", side_effect=[""]),
@@ -496,7 +892,7 @@ class AgentTests(unittest.TestCase):
         ):
             main.main()
         self.assertIn(
-            ("output", "To resume this session: ./launch-k --resume resume-id"),
+            ("info", "To resume this session: ./launch-k --resume resume-id"),
             [call.args for call in render.call_args_list],
         )
 
@@ -513,7 +909,7 @@ class AgentTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "boom"):
                 main.main()
         self.assertIn(
-            ("output", "To resume this session: ./launch-k --resume resume-id"),
+            ("info", "To resume this session: ./launch-k --resume resume-id"),
             [call.args for call in render.call_args_list],
         )
 
@@ -543,6 +939,130 @@ class AgentTests(unittest.TestCase):
             ):
                 main.main()
             self.assertEqual(main.load_session("resume-id")["id"], "resume-id")
+
+    def test_main_lists_sessions_for_resume_command(self):
+        sessions = [{"id": "saved-id", "title": "Saved", "model": "provider/model-x", "cwd": "", "updated_at": ""}]
+        with (
+            patch("builtins.input", side_effect=["/resume", ""]),
+            patch.object(main, "OpenAI"),
+            patch.object(main, "list_sessions", return_value=sessions),
+            patch.object(main, "run_agent") as agent,
+            patch.object(main, "render_pinned_status", return_value=True),
+            patch.object(main, "restore_terminal"),
+            patch.object(main, "render") as render,
+        ):
+            main.main()
+        self.assertIn(("info", main.format_session_list(sessions)), [call.args for call in render.call_args_list])
+        agent.assert_not_called()
+
+    def test_main_switches_session_for_resume_id(self):
+        saved = {"id": "saved-id", "history": [], "transcript": [], "skills": [], "api_mode": "responses", "model": "provider/model-x"}
+        with (
+            patch("builtins.input", side_effect=["/resume saved-id", ""]),
+            patch.object(main, "OpenAI"),
+            patch.object(main, "load_session", return_value=saved),
+            patch.object(main, "save_session") as save,
+            patch.object(main, "render_pinned_status", return_value=True) as status,
+            patch.object(main, "restore_terminal"),
+            patch.object(main, "render") as render,
+        ):
+            main.main()
+        self.assertEqual(save.call_args.args[0]["id"], "saved-id")
+        self.assertEqual(save.call_args.args[0]["cwd"], str(Path.cwd()))
+        self.assertIn(("info", "Resumed saved-id"), [call.args for call in render.call_args_list])
+        self.assertTrue(any("model: provider/model-x" in call.args[0] for call in status.call_args_list))
+
+    def test_main_sets_and_persists_session_model(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(main.Path, "home", return_value=Path(directory)):
+            with (
+                patch("builtins.input", side_effect=["/model provider/model-x", "hello", ""]),
+                patch.object(main, "OpenAI"),
+                patch.object(main, "new_session_id", return_value="model-id"),
+                patch.object(main, "begin_undo_checkpoint", return_value=None),
+                patch.object(main, "finish_undo_checkpoint", return_value=None),
+                patch.object(main, "run_agent", return_value=("hi", 1, 1, [])) as agent,
+                patch.object(main, "render_pinned_status", return_value=True),
+                patch.object(main, "restore_terminal"),
+                patch.object(main, "render"),
+            ):
+                main.main()
+            self.assertEqual(agent.call_args.kwargs["model"], "provider/model-x")
+            self.assertEqual(main.load_session("model-id")["model"], "provider/model-x")
+
+    def test_main_undo_clears_record_after_success(self):
+        saved = {"id": "saved-id", "history": [], "transcript": [], "skills": [], "api_mode": "responses", "undo": {"root": "/repo"}}
+        with (
+            patch("sys.argv", ["k", "--resume", "saved-id"]),
+            patch("builtins.input", side_effect=["/undo", ""]),
+            patch.object(main, "OpenAI"),
+            patch.object(main, "load_session", return_value=saved),
+            patch.object(main, "apply_undo", return_value="Undo complete."),
+            patch.object(main, "save_session") as save,
+            patch.object(main, "render_pinned_status", return_value=True),
+            patch.object(main, "restore_terminal"),
+            patch.object(main, "render"),
+        ):
+            main.main()
+        self.assertIsNone(save.call_args.args[0]["undo"])
+
+    def test_main_rejects_bash_without_tty_confirmation(self):
+        call = SimpleNamespace(type="function_call", name="bash", arguments='{"command": "rm -rf build"}', call_id="call-1")
+        call.to_dict = lambda: {"type": "function_call", "name": "bash", "arguments": '{"command": "rm -rf build"}', "call_id": "call-1"}
+        first = SimpleNamespace(id="resp-1", output=[call], output_text="", usage=None)
+        second = SimpleNamespace(id="resp-2", output=[], output_text="Done", usage=None)
+        client = SimpleNamespace(responses=SimpleNamespace(create=Mock(side_effect=[first, second])))
+        with (
+            patch("builtins.input", side_effect=["remove", ""]),
+            patch("sys.stdin", new_callable=io.StringIO) as stdin,
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+            patch.object(main, "OpenAI", return_value=client),
+            patch.object(main, "bash") as bash,
+            patch.object(main, "render_pinned_status", return_value=True),
+            patch.object(main, "restore_terminal"),
+        ):
+            stdin.isatty = Mock(return_value=False)
+            stdout.isatty = Mock(return_value=False)
+            main.main()
+        bash.assert_not_called()
+
+    def test_main_activity_callback_repaints_status(self):
+        def agent(*args, **kwargs):
+            kwargs["on_activity"]("thinking")
+            kwargs["on_activity"]("bash")
+            return "ok", 1, 1, []
+
+        with (
+            patch("builtins.input", side_effect=["/model provider/model-x", "hello", ""]),
+            patch.object(main, "OpenAI"),
+            patch.object(main, "begin_undo_checkpoint", return_value=None),
+            patch.object(main, "finish_undo_checkpoint", return_value=None),
+            patch.object(main, "run_agent", side_effect=agent),
+            patch.object(main, "render_pinned_status", return_value=True) as status,
+            patch.object(main, "restore_terminal"),
+            patch.object(main, "render"),
+        ):
+            main.main()
+        calls = [call.args[0] for call in status.call_args_list]
+        self.assertTrue(any("model: provider/model-x" in call and "thinking" in call for call in calls))
+        self.assertTrue(any("model: provider/model-x" in call and "bash" in call for call in calls))
+
+    def test_main_derives_title_from_first_normal_prompt_only(self):
+        prompt = "one   two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen"
+        expected = " ".join(prompt.split())[:72]
+        with tempfile.TemporaryDirectory() as directory, patch.object(main.Path, "home", return_value=Path(directory)):
+            with (
+                patch("builtins.input", side_effect=["/model provider/model-x", prompt, ""]),
+                patch.object(main, "OpenAI"),
+                patch.object(main, "new_session_id", return_value="title-id"),
+                patch.object(main, "begin_undo_checkpoint", return_value=None),
+                patch.object(main, "finish_undo_checkpoint", return_value=None),
+                patch.object(main, "run_agent", return_value=("ok", 1, 1, [])),
+                patch.object(main, "render_pinned_status", return_value=True),
+                patch.object(main, "restore_terminal"),
+                patch.object(main, "render"),
+            ):
+                main.main()
+            self.assertEqual(main.load_session("title-id")["title"], expected)
 
     def test_save_session_serializes_response_objects(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(main.Path, "home", return_value=Path(directory)):
@@ -623,7 +1143,7 @@ class AgentTests(unittest.TestCase):
     def test_load_session_rejects_invalid_json(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(main.Path, "home", return_value=Path(directory)):
             path = Path(directory) / ".k" / "sessions" / "bad.json"
-            path.parent.mkdir(parents=True)
+            path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("{", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "cannot load session"):
                 main.load_session("bad")

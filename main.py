@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -17,8 +18,7 @@ from dotenv import load_dotenv
 # Fail before importing it so `uv run main.py` gives an actionable error.
 if __name__ == "__main__" and sys.version_info.releaselevel != "final":
     print(
-        f"Error: k requires a stable Python release; found {sys.version.split()[0]}. "
-        "Recreate .venv with `uv python install 3.12 && uv sync`.",
+        f"Error: k requires a stable Python release; found {sys.version.split()[0]}. Recreate .venv with `uv python install 3.12 && uv sync`.",
         file=sys.stderr,
     )
     raise SystemExit(1)
@@ -41,6 +41,22 @@ IMAGE_TYPES = {
     ".webp": "image/webp",
 }
 
+MAX_TEXT_FILE_BYTES = 1_000_000
+MAX_IMAGE_FILE_BYTES = 5_000_000
+DEFAULT_BASH_TIMEOUT = 60
+MAX_AGENT_TOOL_TURNS = 20
+MAX_HISTORY_ITEMS = 200
+
+
+def project_path(path: str) -> Path:
+    root = Path.cwd().resolve()
+    target = Path(path).resolve(strict=False)
+    try:
+        target.relative_to(root)
+    except ValueError:
+        raise ValueError("path is outside the project") from None
+    return target
+
 
 def read(path: str, offset: int = 1, limit: int = 2000) -> str | list[dict[str, str]]:
     if offset < 1:
@@ -48,8 +64,10 @@ def read(path: str, offset: int = 1, limit: int = 2000) -> str | list[dict[str, 
     if limit < 1:
         return "Error: limit must be at least 1"
     try:
-        target = Path(path)
+        target = project_path(path)
         if target.suffix.lower() in IMAGE_TYPES:
+            if target.stat().st_size > MAX_IMAGE_FILE_BYTES:
+                return f"Error: image exceeds {MAX_IMAGE_FILE_BYTES}-byte limit"
             data = base64.b64encode(target.read_bytes()).decode()
             return [
                 {
@@ -57,6 +75,8 @@ def read(path: str, offset: int = 1, limit: int = 2000) -> str | list[dict[str, 
                     "image_url": f"data:{IMAGE_TYPES[target.suffix.lower()]};base64,{data}",
                 }
             ]
+        if target.stat().st_size > MAX_TEXT_FILE_BYTES:
+            return f"Error: file exceeds {MAX_TEXT_FILE_BYTES}-byte limit"
         lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
         return "\n".join(
             f"{number}: {line}"
@@ -71,7 +91,7 @@ def read(path: str, offset: int = 1, limit: int = 2000) -> str | list[dict[str, 
 
 def write(path: str, content: str) -> str:
     try:
-        target = Path(path)
+        target = project_path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
         return f"Wrote {target}"
@@ -81,7 +101,7 @@ def write(path: str, content: str) -> str:
 
 def edit(path: str, oldText: str, newText: str) -> str:
     try:
-        target = Path(path)
+        target = project_path(path)
         content = target.read_text(encoding="utf-8", errors="replace")
         if content.count(oldText) != 1:
             return "Error: oldText must occur exactly once"
@@ -92,6 +112,9 @@ def edit(path: str, oldText: str, newText: str) -> str:
 
 
 def bash(command: str, timeout: int | None = None) -> str:
+    effective_timeout = DEFAULT_BASH_TIMEOUT if timeout is None else timeout
+    if not isinstance(effective_timeout, int) or not 1 <= effective_timeout <= DEFAULT_BASH_TIMEOUT:
+        return f"Error: timeout must be between 1 and {DEFAULT_BASH_TIMEOUT}s"
     try:
         result = subprocess.run(
             command,
@@ -100,7 +123,7 @@ def bash(command: str, timeout: int | None = None) -> str:
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            timeout=timeout,
+            timeout=effective_timeout,
             encoding="utf-8",
             errors="replace",
         )
@@ -108,7 +131,7 @@ def bash(command: str, timeout: int | None = None) -> str:
             return f"[exit {result.returncode}]\n{result.stdout}"
         return result.stdout
     except subprocess.TimeoutExpired:
-        return f"Error: command timed out after {timeout}s"
+        return f"Error: command timed out after {effective_timeout}s"
     except OSError as e:
         return f"Error: {e}"
 
@@ -242,14 +265,28 @@ def skill_instructions(names: list[str]) -> tuple[str, list[str]]:
 RESET = "\033[0m"
 PALETTES = {
     "light": {
-        "text": "#1f2328", "accent": "#5a8080", "muted": "#6c6c6c",
-        "tool": "#547da7", "error": "#aa5555", "heading": "#9a7326",
-        "code": "#5a8080", "code_block": "#588458", "list": "#588458",
+        "text": "#1f2328",
+        "accent": "#5a8080",
+        "muted": "#6c6c6c",
+        "tool": "#547da7",
+        "error": "#aa5555",
+        "info": "#4f8f4f",
+        "heading": "#9a7326",
+        "code": "#5a8080",
+        "code_block": "#588458",
+        "list": "#588458",
     },
     "dark": {
-        "text": "#d4d4d4", "accent": "#8abeb7", "muted": "#808080",
-        "tool": "#5f87ff", "error": "#cc6666", "heading": "#f0c674",
-        "code": "#8abeb7", "code_block": "#b5bd68", "list": "#8abeb7",
+        "text": "#d4d4d4",
+        "accent": "#8abeb7",
+        "muted": "#808080",
+        "tool": "#5f87ff",
+        "error": "#cc6666",
+        "info": "#7fd787",
+        "heading": "#f0c674",
+        "code": "#8abeb7",
+        "code_block": "#b5bd68",
+        "list": "#8abeb7",
     },
 }
 COLORS: dict[str, str] = {}
@@ -298,12 +335,19 @@ def format_markdown(text: str) -> str:
             result.append(f"{color('text')}{_inline(line)}{RESET}")
     return "\n".join(result)
 
+
 def k_dir() -> Path:
     return Path.home() / ".k"
 
 
 def sessions_dir() -> Path:
-    return k_dir() / "sessions"
+    path = k_dir() / "sessions"
+    path.mkdir(parents=True, exist_ok=True)
+    try:
+        path.chmod(0o700)
+    except OSError:
+        pass
+    return path
 
 
 def new_session_id() -> str:
@@ -315,6 +359,18 @@ def session_path(session_id: str) -> Path:
     if "/" in session_id or "\\" in session_id or session_id in {"", ".", ".."}:
         raise ValueError("invalid session id")
     return sessions_dir() / f"{session_id}.json"
+
+
+def ensure_session_defaults(session: dict) -> dict:
+    session.setdefault("skills", [])
+    session.setdefault("api_mode", API_MODE)
+    session.setdefault("model", MODEL)
+    session.setdefault("title", "")
+    session.setdefault("cwd", "")
+    session.setdefault("created_at", datetime.now(timezone.utc).isoformat())
+    session.setdefault("updated_at", session["created_at"])
+    session.setdefault("undo", None)
+    return session
 
 
 def load_session(session_id: str) -> dict:
@@ -332,15 +388,70 @@ def load_session(session_id: str) -> dict:
         or not isinstance(session.get("history"), list)
         or not isinstance(session.get("transcript"), list)
         or ("skills" in session and not isinstance(session["skills"], list))
+        or any(field in session and not isinstance(session[field], str) for field in ("model", "title", "cwd", "created_at", "updated_at"))
+        or ("undo" in session and session["undo"] is not None and not isinstance(session["undo"], dict))
     ):
         raise ValueError("cannot load session: invalid session data")
-    return session
+    return ensure_session_defaults(session)
+
+
+def write_private_text(path: Path, content: str) -> None:
+    fd, temp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(content)
+        os.chmod(temp_name, 0o600)
+        os.replace(temp_name, path)
+    except BaseException:
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+        raise
 
 
 def save_session(session: dict) -> None:
-    path = session_path(session["id"])
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(session, indent=2, default=lambda value: value.to_dict()), encoding="utf-8")
+    ensure_session_defaults(session)
+    if not session["cwd"]:
+        session["cwd"] = str(Path.cwd())
+    session["updated_at"] = datetime.now(timezone.utc).isoformat()
+    write_private_text(session_path(session["id"]), json.dumps(session, indent=2, default=lambda value: value.to_dict()))
+
+
+MAX_SESSION_LISTING = 20
+
+
+def list_sessions(limit: int = MAX_SESSION_LISTING) -> list[dict[str, str]]:
+    summaries = []
+    for path in sessions_dir().glob("*.json"):
+        try:
+            session = load_session(path.stem)
+        except (ValueError, OSError):
+            continue
+        summaries.append(
+            {
+                "id": session["id"],
+                "title": session["title"] or "(untitled)",
+                "cwd": session["cwd"],
+                "updated_at": session["updated_at"],
+                "model": session["model"],
+            }
+        )
+    return sorted(summaries, key=lambda summary: summary["updated_at"], reverse=True)[:limit]
+
+
+def format_session_list(sessions: list[dict[str, str]]) -> str:
+    if not sessions:
+        return "No saved sessions."
+    lines = ["Recent sessions:"]
+    for s in sessions:
+        parts = [s["id"], s["title"], s["model"]]
+        if s["cwd"]:
+            parts.append(s["cwd"])
+        if s["updated_at"]:
+            parts.append(s["updated_at"][:19])
+        lines.append("  " + " | ".join(parts))
+    return "\n".join(lines)
 
 
 def compact_output(text: str, label: str, session_id: str | None = None) -> str:
@@ -353,7 +464,7 @@ def compact_output(text: str, label: str, session_id: str | None = None) -> str:
         artifact_dir = sessions_dir() / f"{session_id}-artifacts"
         artifact_dir.mkdir(parents=True, exist_ok=True)
         artifact = artifact_dir / f"{label}-{datetime.now(timezone.utc).strftime('%H%M%S')}-{uuid4().hex[:6]}.txt"
-        artifact.write_text(text, encoding="utf-8")
+        write_private_text(artifact, text)
         saved = f"\nFull output saved: {artifact}"
     return f"[context-mode: output compacted from {len(text)} chars]\n{head}\n...\n{tail}{saved}"
 
@@ -376,7 +487,9 @@ Guidelines:
 - Show file paths clearly when working with files"""
 
 
-def dispatch_tool(name: str, arguments: str, call_id: str, session_id: str | None = None) -> dict:
+def dispatch_tool(
+    name: str, arguments: str, call_id: str, session_id: str | None = None, *, confirm_bash: object = None, on_activity: object = None
+) -> dict:
     try:
         args = json.loads(arguments)
     except json.JSONDecodeError as e:
@@ -385,6 +498,14 @@ def dispatch_tool(name: str, arguments: str, call_id: str, session_id: str | Non
             "call_id": call_id,
             "output": f"Error: invalid JSON in arguments: {e}",
         }
+    command = args.get("command") if isinstance(args, dict) else None
+    if name == "bash":
+        if not isinstance(command, str) or confirm_bash is None or not confirm_bash(command):
+            return {
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": "Error: bash command rejected by user",
+            }
     handler = TOOL_HANDLERS.get(name)
     if handler is None:
         return {
@@ -392,6 +513,8 @@ def dispatch_tool(name: str, arguments: str, call_id: str, session_id: str | Non
             "call_id": call_id,
             "output": f"Error: Unknown tool: {name}",
         }
+    if on_activity:
+        on_activity(name)
     try:
         result = handler(**args)
     except Exception as e:
@@ -409,6 +532,106 @@ def dispatch_tool(name: str, arguments: str, call_id: str, session_id: str | Non
     }
 
 
+def _git(args: list[str], data: str | None = None) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=Path.cwd(),
+            text=True,
+            input=data,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError:
+        return None
+    return result.stdout if result.returncode == 0 else None
+
+
+def _git_root() -> str | None:
+    root = _git(["rev-parse", "--show-toplevel"])
+    return str(Path(root.strip()).resolve()) if root else None
+
+
+def begin_undo_checkpoint() -> dict | None:
+    if _git(["status", "--porcelain"]) != "":
+        return None
+    root = _git_root()
+    patch = _git(["diff", "--binary", "HEAD"])
+    untracked = _git(["ls-files", "--others", "--exclude-standard"])
+    if root is None or patch is None or untracked is None:
+        return None
+    return {"root": root, "patch": patch, "untracked": sorted(set(untracked.splitlines()))}
+
+
+def finish_undo_checkpoint(checkpoint: dict | None) -> dict | None:
+    if not isinstance(checkpoint, dict):
+        return None
+    root = checkpoint.get("root")
+    baseline_patch = checkpoint.get("patch")
+    baseline_untracked = checkpoint.get("untracked")
+    if not isinstance(root, str) or not isinstance(baseline_patch, str) or not isinstance(baseline_untracked, list):
+        return None
+    if _git_root() != root:
+        return None
+    patch = _git(["diff", "--binary", "HEAD"])
+    index_patch = _git(["diff", "--binary", "--cached", "HEAD"])
+    untracked = _git(["ls-files", "--others", "--exclude-standard"])
+    if patch is None or index_patch is None or untracked is None:
+        return None
+    post_untracked = set(untracked.splitlines())
+    if patch == baseline_patch and post_untracked == set(baseline_untracked):
+        return None
+    return {"root": root, "patch": patch, "index_patch": index_patch, "untracked": sorted(post_untracked - set(baseline_untracked))}
+
+
+def apply_undo(record: dict | None) -> str:
+    if not isinstance(record, dict):
+        return "Undo unavailable: no checkpoint."
+    root = record.get("root")
+    patch = record.get("patch")
+    index_patch = record.get("index_patch")
+    untracked = record.get("untracked")
+    if (
+        not isinstance(root, str)
+        or not isinstance(patch, str)
+        or not isinstance(index_patch, str)
+        or not isinstance(untracked, list)
+        or not all(isinstance(path, str) for path in untracked)
+    ):
+        return "Undo unavailable: no checkpoint."
+    if _git_root() != root:
+        return "Undo unavailable: checkpoint is for a different repository."
+    current_patch = _git(["diff", "--binary", "HEAD"])
+    current_index_patch = _git(["diff", "--binary", "--cached", "HEAD"])
+    current_untracked = _git(["ls-files", "--others", "--exclude-standard"])
+    if current_patch is None or current_index_patch is None or current_untracked is None:
+        return "Undo unavailable: no checkpoint."
+    if current_patch != patch or current_index_patch != index_patch or set(current_untracked.splitlines()) != set(untracked):
+        return "Undo refused: worktree changed since the turn."
+    if patch and _git(["apply", "--reverse", "--binary"], patch) is None:
+        return "Undo failed: patch could not be applied."
+    if index_patch and _git(["apply", "--reverse", "--binary", "--cached"], index_patch) is None:
+        return "Undo failed: patch could not be applied."
+    root_path = Path(root).resolve()
+    for name in untracked:
+        path = root_path / name
+        try:
+            path.resolve().relative_to(root_path)
+        except ValueError:
+            continue
+        try:
+            if path.is_file() or path.is_symlink():
+                path.unlink()
+            parent = path.parent
+            while parent != root_path:
+                parent.rmdir()
+                parent = parent.parent
+        except OSError:
+            continue
+    return "Undo complete."
+
+
 def git_branch() -> str | None:
     try:
         result = subprocess.run(
@@ -424,14 +647,14 @@ def git_branch() -> str | None:
     return result.stdout.strip() or None
 
 
-def status_line(total_tokens: int | str, context_tokens: int | None) -> str:
+def status_line(total_tokens: int | str, context_tokens: int | None, model: str = MODEL, activity: str = "") -> str:
     parts = ["k", str(Path.cwd())]
     if branch := git_branch():
         parts.append(branch)
     context = context_tokens if context_tokens is not None else "?"
-    parts.extend(
-        [f"model: {MODEL}", f"tokens: {total_tokens}", f"context: {context}"]
-    )
+    parts.extend([f"model: {model}", f"tokens: {total_tokens}", f"context: {context}"])
+    if activity:
+        parts.append(activity)
     return " | ".join(parts)
 
 
@@ -447,9 +670,17 @@ def render(kind: str, text: str) -> None:
             sys.stdout.write(f"{color('error')}{text}{RESET}\n")
         else:
             sys.stdout.write(f"{text}\n")
+    elif kind == "info":
+        if is_tty:
+            sys.stdout.write(f"{color('info')}{text}{RESET}\n")
+        else:
+            sys.stdout.write(f"{text}\n")
     elif kind == "status":
         if is_tty:
-            lines = [f"\033[7m{color('accent')} k {RESET}{color('muted')}{line[1:]}{RESET}" if line.startswith("k") else f"{color('muted')}{line}{RESET}" for line in text.splitlines()]
+            lines = [
+                f"\033[7m{color('accent')} k {RESET}{color('muted')}{line[1:]}{RESET}" if line.startswith("k") else f"{color('muted')}{line}{RESET}"
+                for line in text.splitlines()
+            ]
             sys.stdout.write("\n".join(lines) + "\n")
         else:
             sys.stdout.write(f"{text}\n")
@@ -513,24 +744,62 @@ def handle_command(text: str) -> str | None:
     return f"Unknown command: {text.split()[0]}"
 
 
-def run_agent(task: str, client: OpenAI, history: list[object] | None = None, session_id: str | None = None, skills: list[str] | None = None) -> tuple[str, int, int | None, list[object]]:
+def run_agent(
+    task: str,
+    client: OpenAI,
+    history: list[object] | None = None,
+    session_id: str | None = None,
+    skills: list[str] | None = None,
+    *,
+    model: str = MODEL,
+    confirm_bash: object = None,
+    on_activity: object = None,
+) -> tuple[str, int, int | None, list[object]]:
     instructions, missing = skill_instructions(skills or [])
     for name in missing:
-        render("output", f"Warning: skill '{name}' not found, skipping")
+        render("info", f"Warning: skill '{name}' not found, skipping")
     if API_MODE == "responses":
-        return run_responses_agent(task, client, instructions, history, session_id)
+        return run_responses_agent(task, client, instructions, history, session_id, model=model, confirm_bash=confirm_bash, on_activity=on_activity)
     if API_MODE == "chat-completions":
-        return run_chat_agent(task, client, instructions, history, session_id)
+        return run_chat_agent(task, client, instructions, history, session_id, model=model, confirm_bash=confirm_bash, on_activity=on_activity)
     raise RuntimeError("K_API_MODE must be 'responses' or 'chat-completions'")
 
 
-def run_responses_agent(task: str, client: OpenAI, instructions: str, history: list[object] | None, session_id: str | None) -> tuple[str, int, int | None, list[object]]:
+def _trim_history(history: list) -> list:
+    if len(history) <= MAX_HISTORY_ITEMS:
+        return history
+    trimmed = history[-MAX_HISTORY_ITEMS:]
+
+    def is_orphan(item: object) -> bool:
+        if isinstance(item, dict):
+            return item.get("role") == "tool" or item.get("type") == "function_call"
+        return getattr(item, "type", None) == "function_call"
+
+    while trimmed and is_orphan(trimmed[0]):
+        trimmed = trimmed[1:]
+    return trimmed
+
+
+def run_responses_agent(
+    task: str,
+    client: OpenAI,
+    instructions: str,
+    history: list[object] | None,
+    session_id: str | None,
+    *,
+    model: str = MODEL,
+    confirm_bash: object = None,
+    on_activity: object = None,
+) -> tuple[str, int, int | None, list[object]]:
     history = list(history or [])
     history.append({"role": "user", "content": task})
     total_tokens = 0
     context_tokens = None
+    tool_turns = 0
     while True:
-        response = client.responses.create(model=MODEL, instructions=instructions, input=list(history), tools=TOOLS)
+        if on_activity:
+            on_activity("thinking")
+        response = client.responses.create(model=model, instructions=instructions, input=list(_trim_history(history)), tools=TOOLS)
         output = getattr(response, "output", None)
         if not isinstance(output, list):
             raise RuntimeError("provider response is malformed")
@@ -545,27 +814,51 @@ def run_responses_agent(task: str, client: OpenAI, instructions: str, history: l
             raise RuntimeError("provider response is malformed")
         if not calls:
             history.extend(output)
-            return response.output_text, total_tokens, context_tokens, history
+            return response.output_text, total_tokens, context_tokens, _trim_history(history)
+        tool_turns += 1
+        if tool_turns > MAX_AGENT_TOOL_TURNS:
+            raise RuntimeError(f"agent exceeded {MAX_AGENT_TOOL_TURNS} tool turns")
         history.extend(output)
-        history.extend(dispatch_tool(call.name, call.arguments, call.call_id, session_id) for call in calls)
+        history.extend(
+            dispatch_tool(call.name, call.arguments, call.call_id, session_id, confirm_bash=confirm_bash, on_activity=on_activity) for call in calls
+        )
         for call in calls:
             render("tool", f"{call.name}({call.arguments})")
 
 
-def run_chat_agent(task: str, client: OpenAI, instructions: str, history: list[object] | None, session_id: str | None) -> tuple[str, int, int | None, list[object]]:
-    history = list(history or [])
+def run_chat_agent(
+    task: str,
+    client: OpenAI,
+    instructions: str,
+    history: list[object] | None,
+    session_id: str | None,
+    *,
+    model: str = MODEL,
+    confirm_bash: object = None,
+    on_activity: object = None,
+) -> tuple[str, int, int | None, list[object]]:
+    saved_history = list(history or [])
+    history = []
     # Older k versions persisted empty tool_calls arrays on ordinary assistant
-    # messages. OpenAI-compatible providers can reject those histories.
-    for item in history:
-        if isinstance(item, dict) and item.get("role") == "assistant" and item.get("tool_calls") == []:
-            item.pop("tool_calls")
+    # messages, and some providers returned assistant messages with neither
+    # content nor tool calls. Both forms are invalid for Chat Completions.
+    for item in saved_history:
+        if isinstance(item, dict) and item.get("role") == "assistant":
+            content = item.get("content")
+            tool_calls = item.get("tool_calls")
+            if not content and not tool_calls:
+                continue
+            if tool_calls == []:
+                item = {key: value for key, value in item.items() if key != "tool_calls"}
+        history.append(item)
     history.append({"role": "user", "content": task})
     total_tokens = 0
     context_tokens = None
+    tool_turns = 0
     while True:
-        response = client.chat.completions.create(
-            model=MODEL, messages=[{"role": "system", "content": instructions}, *history], tools=CHAT_TOOLS
-        )
+        if on_activity:
+            on_activity("thinking")
+        response = client.chat.completions.create(model=model, messages=[{"role": "system", "content": instructions}, *_trim_history(history)], tools=CHAT_TOOLS)
         choices = getattr(response, "choices", None)
         if not isinstance(choices, list) or not choices:
             raise RuntimeError("provider response is malformed")
@@ -586,17 +879,24 @@ def run_chat_agent(task: str, client: OpenAI, instructions: str, history: list[o
             for call in calls
         ):
             raise RuntimeError("provider response is malformed")
-        assistant_message = {"role": "assistant", "content": getattr(message, "content", None)}
+        content = getattr(message, "content", None)
+        if not calls and not content:
+            raise RuntimeError("provider response is malformed")
+        assistant_message = {"role": "assistant", "content": content}
         if calls:
             assistant_message["tool_calls"] = [
-                {"id": call.id, "type": "function", "function": {"name": call.function.name, "arguments": call.function.arguments}}
-                for call in calls
+                {"id": call.id, "type": "function", "function": {"name": call.function.name, "arguments": call.function.arguments}} for call in calls
             ]
         history.append(assistant_message)
         if not calls:
-            return message.content or "", total_tokens, context_tokens, history
+            return content, total_tokens, context_tokens, _trim_history(history)
+        tool_turns += 1
+        if tool_turns > MAX_AGENT_TOOL_TURNS:
+            raise RuntimeError(f"agent exceeded {MAX_AGENT_TOOL_TURNS} tool turns")
         for call in calls:
-            result = dispatch_tool(call.function.name, call.function.arguments, call.id, session_id)
+            result = dispatch_tool(
+                call.function.name, call.function.arguments, call.id, session_id, confirm_bash=confirm_bash, on_activity=on_activity
+            )
             history.append({"role": "tool", "tool_call_id": call.id, "content": result["output"]})
             render("tool", f"{call.function.name}({call.function.arguments})")
 
@@ -612,7 +912,7 @@ def main() -> None:
     parser.add_argument("--theme", choices=PALETTES, default=os.getenv("K_THEME", "light"))
     args, _ = parser.parse_known_args()
     set_theme(args.theme)
-    session = {"id": new_session_id(), "history": [], "transcript": [], "skills": [], "api_mode": API_MODE}
+    session = {"id": new_session_id(), "history": [], "transcript": [], "skills": [], "api_mode": API_MODE, "model": MODEL, "title": ""}
     if args.resume:
         try:
             session = load_session(args.resume)
@@ -620,12 +920,22 @@ def main() -> None:
                 raise ValueError("cannot resume a session created with a different K_API_MODE")
         except ValueError as error:
             render("output", f"Error: {error}")
+    ensure_session_defaults(session)
     client = OpenAI()
+
+    def confirm_bash(command: str) -> bool:
+        if not sys.stdin.isatty() or not sys.stdout.isatty():
+            return False
+        return input("Allow bash command? [y/N] ").strip().lower() == "y"
+
+    def on_activity(activity: str) -> None:
+        render_pinned_status(status_line("?", None, session["model"], activity))
+
     try:
         if sys.stdout.isatty():
             sys.stdout.write("\033[2J\033[H")
             sys.stdout.flush()
-        render_pinned_status(status_line("?", None), move_cursor=True)
+        render_pinned_status(status_line("?", None, session["model"]), move_cursor=True)
         configure_multiline_input()
         while True:
             try:
@@ -636,33 +946,86 @@ def main() -> None:
                 return
             skill_result = handle_skill_command(task, session)
             if skill_result:
-                render("output", skill_result)
+                render("info" if not skill_result.startswith(("Invalid", "Unknown")) else "output", skill_result)
                 save_session(session)
-                render_pinned_status(status_line("?", None))
+                render_pinned_status(status_line("?", None, session["model"]))
                 continue
-            command = handle_command(task)
-            if command == "quit":
+            if task == "/quit":
                 return
-            if command:
-                render("output", command)
+            if task.startswith("/"):
+                parts = task.split()
+                command = parts[0]
+                if command == "/resume":
+                    if len(parts) == 1:
+                        render("info", format_session_list(list_sessions()))
+                    elif len(parts) == 2:
+                        try:
+                            resumed = load_session(parts[1])
+                            if resumed.get("api_mode", "responses") != API_MODE:
+                                raise ValueError("cannot resume a session created with a different K_API_MODE")
+                        except ValueError as error:
+                            render("output", f"Error: {error}")
+                        else:
+                            session = resumed
+                            session["cwd"] = str(Path.cwd())
+                            save_session(session)
+                            render("info", f"Resumed {session['id']}")
+                            render_pinned_status(status_line("?", None, session["model"]))
+                    else:
+                        render("output", "Usage: /resume [session-id]")
+                    continue
+                if command == "/model":
+                    model = task.removeprefix("/model").strip()
+                    if not model:
+                        render("output", "Usage: /model <model-name>")
+                    else:
+                        session["model"] = model
+                        save_session(session)
+                        render("info", f"Model set to {model}")
+                        render_pinned_status(status_line("?", None, session["model"]))
+                    continue
+                if task == "/undo":
+                    result = apply_undo(session.get("undo"))
+                    if result == "Undo complete.":
+                        session["undo"] = None
+                        save_session(session)
+                        render("info", result)
+                    else:
+                        render("output", result)
+                    render_pinned_status(status_line("?", None, session["model"]))
+                    continue
+                render("output", f"Unknown command: {command}")
                 continue
+            if not session["title"]:
+                session["title"] = " ".join(task.split())[:72]
+            checkpoint = begin_undo_checkpoint()
             try:
-                answer, total_tokens, context_tokens, history = run_agent(task, client, session["history"], session["id"], session.get("skills", []))
+                answer, total_tokens, context_tokens, history = run_agent(
+                    task,
+                    client,
+                    session["history"],
+                    session["id"],
+                    session.get("skills", []),
+                    model=session["model"],
+                    confirm_bash=confirm_bash,
+                    on_activity=on_activity,
+                )
                 session["history"] = history
                 session["transcript"].append({"prompt": task, "answer": answer})
+                session["undo"] = finish_undo_checkpoint(checkpoint)
                 save_session(session)
             except Exception as e:
                 render("output", f"Error: {e}")
-                render_pinned_status(status_line("?", None))
+                render_pinned_status(status_line("?", None, session["model"]))
                 continue
             render("answer", answer)
-            render_pinned_status(status_line(total_tokens, context_tokens))
+            render_pinned_status(status_line(total_tokens, context_tokens, session["model"]))
     except KeyboardInterrupt:
         return
     finally:
         restore_terminal()
         save_session(session)
-        render("output", f"To resume this session: {sys.argv[0]} --resume {session['id']}")
+        render("info", f"To resume this session: {sys.argv[0]} --resume {session['id']}")
 
 
 if __name__ == "__main__":
