@@ -32,6 +32,27 @@ class IdentityTests(unittest.TestCase):
             (Path(home) / ".k/config.toml").write_text("[broken", encoding="utf-8")
             self.assertEqual(main.load_config(), {})
 
+    def test_new_session_keeps_model_and_skills(self):
+        session = {"id": "old", "model": "x", "api_mode": "responses", "skills": ["review"], "history": []}
+        new = main.new_session_from(session)
+        self.assertNotEqual(new["id"], "old")
+        self.assertEqual(new["model"], "x")
+        self.assertEqual(new["skills"], ["review"])
+
+    def test_fork_session_copies_history_and_records_parent(self):
+        session = {"id": "old", "history": [{"role": "user", "content": "keep"}], "skills": []}
+        fork = main.fork_session(session)
+        self.assertEqual(fork["forked_from"], "old")
+        self.assertEqual(fork["history"], session["history"])
+        self.assertIsNot(fork["history"], session["history"])
+
+    def test_compact_session_replaces_history_with_summary(self):
+        session = {"id": "old", "model": "x", "api_mode": "responses", "history": [{"role": "user", "content": "work"}]}
+        response = SimpleNamespace(output_text="## Goal\n- work")
+        client = SimpleNamespace(responses=SimpleNamespace(create=Mock(return_value=response)))
+        self.assertEqual(main.compact_session(session, client), "## Goal\n- work")
+        self.assertEqual(session["history"][-1]["content"], "## Goal\n- work")
+
     def test_new_session_id_returns_formatted_stamp(self):
         sid = main.new_session_id()
         # Format: YYYYMMDD-HHMMSS-xxxxxx

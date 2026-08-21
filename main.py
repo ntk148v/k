@@ -1,5 +1,6 @@
-import base64
 import argparse
+import base64
+import copy
 import difflib
 import fnmatch
 import json
@@ -497,6 +498,49 @@ def sessions_dir() -> Path:
 def new_session_id() -> str:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     return f"{stamp}-{uuid4().hex[:6]}"
+
+
+def new_session_from(session: dict) -> dict:
+    return {
+        "id": new_session_id(),
+        "history": [],
+        "transcript": [],
+        "skills": list(session.get("skills", [])),
+        "api_mode": session.get("api_mode", API_MODE),
+        "model": session.get("model", MODEL),
+        "title": "",
+        "forked_from": None,
+        "undo": None,
+    }
+
+
+def fork_session(session: dict) -> dict:
+    fork = new_session_from(session)
+    fork["history"] = copy.deepcopy(session.get("history", []))
+    fork["transcript"] = copy.deepcopy(session.get("transcript", []))
+    fork["forked_from"] = session.get("id")
+    return fork
+
+
+def compact_session(session: dict, client: OpenAI, focus: str = "") -> str:
+    prompt = "Summarize this coding session into Goal, Constraints, Progress, Files, and Next Steps. Return only the summary."
+    if focus:
+        prompt += f"\nFocus: {focus}"
+    history = list(session.get("history", [])) + [{"role": "user", "content": prompt}]
+    if session.get("api_mode", API_MODE) == "responses":
+        response = client.responses.create(model=session["model"], instructions=SYSTEM_PROMPT, input=_trim_history(history), tools=[])
+        summary = response.output_text
+    else:
+        response = client.chat.completions.create(
+            model=session["model"],
+            messages=[{"role": "system", "content": SYSTEM_PROMPT}, *history],
+            tools=[],
+        )
+        summary = response.choices[0].message.content
+    if not summary:
+        raise RuntimeError("provider returned an empty summary")
+    session["history"] = [{"role": "user", "content": "[compacted]"}, {"role": "assistant", "content": summary}]
+    return summary
 
 
 def session_path(session_id: str) -> Path:
@@ -1169,6 +1213,25 @@ def main() -> None:
                         session["api_mode"] = preset.get("api_mode", session.get("api_mode", API_MODE))
                         save_session(session)
                         render("info", f"Preset set to {name}")
+                    continue
+                if command == "/new":
+                    session = new_session_from(session)
+                    save_session(session)
+                    render("info", f"Started {session['id']}")
+                    continue
+                if command == "/fork":
+                    session = fork_session(session)
+                    save_session(session)
+                    render("info", f"Forked {session['id']}")
+                    continue
+                if command == "/compact":
+                    try:
+                        summary = compact_session(session, client, task.removeprefix("/compact").strip())
+                        session["transcript"].append({"prompt": "/compact", "answer": summary})
+                        save_session(session)
+                        render("answer", summary)
+                    except Exception as error:
+                        render("output", f"Error: {error}")
                     continue
                 if task == "/undo":
                     result = apply_undo(session.get("undo"))
