@@ -29,7 +29,9 @@
 
 - **Minimal.** One file, stdlib, no frameworks.
 - **OpenAI Responses and Chat Completions APIs.** Native function calling with self-contained request history; select the API your provider supports.
-- **Tool loop.** `read`, `write`, `edit`, `bash` — the four operations that cover most coding tasks.
+- **Tool loop.** `read`, `write`, `edit`, `grep`, `bash` — the small set that covers most coding tasks.
+- **Headless mode.** `k -p "task"` prints a final answer for scripts and CI.
+- **Streaming.** Interactive responses and tool arguments arrive incrementally.
 - **Context-mode compaction.** Large tool outputs are truncated to a useful head/tail preview; the full text is saved to disk alongside the session.
 - **Session persistence.** Every conversation is saved to `~/.k/sessions/<id>.json`. Resume any session by ID.
 - **Session discovery.** `/resume` lists up to 20 recent sessions; `/resume <id>` switches to one.
@@ -42,6 +44,7 @@
 - **Skills.** Load Markdown skill files from `~/.agents/skills/` to inject system instructions dynamically.
 - **Project instructions.** `AGENTS.md` in the current directory is added to every agent request (up to 16 KiB).
 - **Reviewable edits.** Exact edits return a unified diff and refuse a file that changed after K read it.
+- **Session controls.** `/new`, `/fork`, and manual `/compact` keep experiments reversible.
 - **Terminal UI.** Pi-inspired truecolor light/dark themes, pinned status line (showing model, tokens, git branch, cwd), colored Markdown rendering, multiline prompts.
 - **Portable.** Works with OpenAI-compatible providers that support either Responses or Chat Completions — OpenAI, OpenRouter, xAI, local LLMs, and OpenCode Zen.
 
