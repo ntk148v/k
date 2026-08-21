@@ -1020,9 +1020,6 @@ def _stream_responses_turn(client: OpenAI, model: str, instructions: str, histor
         kind = getattr(event, "type", "")
         if kind == "response.output_text.delta":
             assembler.consume({"type": "text_delta", "text": getattr(event, "delta", "")})
-            if not quiet:
-                sys.stdout.write(getattr(event, "delta", ""))
-                sys.stdout.flush()
         elif kind == "response.output_item.added":
             item = getattr(event, "item", None)
             if getattr(item, "type", "") == "function_call":
@@ -1041,9 +1038,6 @@ def _stream_chat_turn(client: OpenAI, model: str, instructions: str, history: li
         text = getattr(delta, "content", None)
         if text:
             assembler.consume({"type": "text_delta", "text": text})
-            if not quiet:
-                sys.stdout.write(text)
-                sys.stdout.flush()
         for call in getattr(delta, "tool_calls", None) or []:
             index = getattr(call, "index", 0)
             function = getattr(call, "function", None)
@@ -1078,8 +1072,6 @@ def run_responses_agent(
         if stream:
             text, streamed_calls = _stream_responses_turn(client, model, instructions, history, quiet)
             if not streamed_calls:
-                if not quiet and text:
-                    sys.stdout.write("\n")
                 history.append({"role": "assistant", "content": text})
                 return text, total_tokens, context_tokens, _trim_history(history)
             tool_turns += 1
@@ -1155,8 +1147,6 @@ def run_chat_agent(
         if stream:
             text, streamed_calls = _stream_chat_turn(client, model, instructions, history, quiet)
             if not streamed_calls:
-                if not quiet and text:
-                    sys.stdout.write("\n")
                 history.append({"role": "assistant", "content": text})
                 return text, total_tokens, context_tokens, _trim_history(history)
             tool_turns += 1
@@ -1417,8 +1407,7 @@ def main() -> None:
                 render("output", f"Error: {e}")
                 render_pinned_status(status_line("?", None, session["model"]))
                 continue
-            if not (streaming and sys.stdout.isatty()):
-                render("answer", answer)
+            render("answer", answer)
             render_pinned_status(status_line(total_tokens, context_tokens, session["model"]))
     except KeyboardInterrupt:
         return

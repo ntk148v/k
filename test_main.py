@@ -642,6 +642,16 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(answer, "hello world")
         self.assertTrue(client.responses.create.call_args.kwargs["stream"])
 
+    def test_streamed_markdown_uses_answer_renderer(self):
+        events = [SimpleNamespace(type="response.output_text.delta", delta="**hello**")]
+        client = SimpleNamespace(responses=SimpleNamespace(create=Mock(return_value=events)))
+        with patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            stdout.isatty = Mock(return_value=True)
+            answer, _, _, _ = main.run_agent("say hello", client, stream=True)
+            self.assertEqual(stdout.getvalue(), "")
+            main.render("answer", answer)
+        self.assertIn("\033[1mhello", stdout.getvalue())
+
     def test_main_print_mode_writes_only_final_answer_to_stdout(self):
         with (
             patch.object(sys, "argv", ["k", "-p", "describe main"]),
