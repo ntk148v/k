@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -54,6 +55,22 @@ MAX_GREP_MATCHES = 2_000
 PROJECT_INSTRUCTIONS_MAX_BYTES = 16 * 1024
 PROJECT_INSTRUCTIONS_TOTAL_BYTES = 48 * 1024
 READ_STAMPS: dict[Path, tuple[int, int]] = {}
+
+
+def load_config() -> dict[str, object]:
+    path = Path.home() / ".k" / "config.toml"
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    defaults = data.get("defaults", {})
+    presets = data.get("presets", {})
+    if not isinstance(defaults, dict) or not isinstance(presets, dict):
+        return {}
+    valid_presets = {name: values for name, values in presets.items() if isinstance(name, str) and isinstance(values, dict)}
+    return {"defaults": defaults, "presets": valid_presets}
 
 
 def project_path(path: str) -> Path:
@@ -869,14 +886,16 @@ def run_agent(
     confirm_bash: object = None,
     on_activity: object = None,
     quiet: bool = False,
+    api_mode: str | None = None,
 ) -> tuple[str, int, int | None, list[object]]:
     instructions, missing = skill_instructions(skills or [])
+    selected_api_mode = api_mode or API_MODE
     for name in missing:
         if not quiet:
             render("info", f"Warning: skill '{name}' not found, skipping")
-    if API_MODE == "responses":
+    if selected_api_mode == "responses":
         return run_responses_agent(task, client, instructions, history, session_id, model=model, confirm_bash=confirm_bash, on_activity=on_activity, quiet=quiet)
-    if API_MODE == "chat-completions":
+    if selected_api_mode == "chat-completions":
         return run_chat_agent(task, client, instructions, history, session_id, model=model, confirm_bash=confirm_bash, on_activity=on_activity, quiet=quiet)
     raise RuntimeError("K_API_MODE must be 'responses' or 'chat-completions'")
 
@@ -1042,13 +1061,24 @@ def main() -> None:
         except ValueError as error:
             render("output", f"Error: {error}")
     ensure_session_defaults(session)
-    client = OpenAI()
+    config = load_config()
+    defaults = config.get("defaults", {})
+    if not isinstance(defaults, dict):
+        defaults = {}
+    selected_model = os.getenv("OPENAI_MODEL_NAME") or defaults.get("model") or MODEL
+    selected_api_mode = os.getenv("K_API_MODE") or defaults.get("api_mode") or API_MODE
+    if selected_api_mode not in {"responses", "chat-completions"}:
+        parser.error("api_mode must be 'responses' or 'chat-completions'")
+    base_url = defaults.get("base_url")
+    client = OpenAI(base_url=base_url) if isinstance(base_url, str) and base_url else OpenAI()
+    session["model"] = selected_model
+    session["api_mode"] = selected_api_mode
 
     if args.print_prompt is not None:
         prompt = args.print_prompt or " ".join(extra) or (sys.stdin.read() if not sys.stdin.isatty() else "")
         if not prompt.strip():
             parser.error("-p requires a prompt or piped stdin")
-        answer, _, _, _ = run_agent(prompt, client, session["history"], session["id"], session.get("skills", []), model=session["model"], quiet=True)
+        answer, _, _, _ = run_agent(prompt, client, session["history"], session["id"], session.get("skills", []), model=session["model"], quiet=True, api_mode=session["api_mode"])
         print(answer)
         return
 
@@ -1113,6 +1143,20 @@ def main() -> None:
                         render("info", f"Model set to {model}")
                         render_pinned_status(status_line("?", None, session["model"]))
                     continue
+                if command == "/preset":
+                    name = task.removeprefix("/preset").strip()
+                    presets = config.get("presets", {})
+                    preset = presets.get(name) if isinstance(presets, dict) else None
+                    if not name or not isinstance(preset, dict):
+                        render("output", "Usage: /preset <name>" if not name else f"Unknown preset: {name}")
+                    elif preset.get("api_mode", session.get("api_mode")) not in {"responses", "chat-completions"}:
+                        render("output", "Preset api_mode must be 'responses' or 'chat-completions'")
+                    else:
+                        session["model"] = preset.get("model", session["model"])
+                        session["api_mode"] = preset.get("api_mode", session.get("api_mode", API_MODE))
+                        save_session(session)
+                        render("info", f"Preset set to {name}")
+                    continue
                 if task == "/undo":
                     result = apply_undo(session.get("undo"))
                     if result == "Undo complete.":
@@ -1137,6 +1181,7 @@ def main() -> None:
                     session.get("skills", []),
                     model=session["model"],
                     confirm_bash=confirm_bash,
+                    api_mode=session.get("api_mode"),
                     on_activity=on_activity,
                 )
                 session["history"] = history

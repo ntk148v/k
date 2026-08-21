@@ -152,7 +152,22 @@ K_API_MODE=chat-completions \
 uv run python main.py
 ```
 
-Set defaults via environment variables:
+Set defaults via environment variables or `~/.k/config.toml`:
+
+```toml
+[defaults]
+model = "openrouter/free"
+api_mode = "responses"
+base_url = "https://openrouter.ai/api/v1"
+
+[presets.fast]
+model = "provider/fast-model"
+api_mode = "chat-completions"
+```
+
+Use `/preset fast` during a session.
+
+Environment variables override config values:
 
 - `K_THEME` — `light` (default) or `dark`
 - `OPENAI_MODEL_NAME` — model name (default: `openrouter/free`)

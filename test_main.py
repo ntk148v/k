@@ -15,6 +15,23 @@ import main
 class IdentityTests(unittest.TestCase):
     """Tests for helper/identity functions that don't need complex mocking."""
 
+    def test_load_config_reads_defaults_and_presets(self):
+        with tempfile.TemporaryDirectory() as home, patch.object(main.Path, "home", return_value=Path(home)):
+            (Path(home) / ".k").mkdir()
+            (Path(home) / ".k/config.toml").write_text(
+                "[defaults]\nmodel='base'\n[presets.fast]\nmodel='fast'\napi_mode='chat-completions'\n",
+                encoding="utf-8",
+            )
+            config = main.load_config()
+        self.assertEqual(config["defaults"]["model"], "base")
+        self.assertEqual(config["presets"]["fast"]["model"], "fast")
+
+    def test_load_config_ignores_malformed_files(self):
+        with tempfile.TemporaryDirectory() as home, patch.object(main.Path, "home", return_value=Path(home)):
+            (Path(home) / ".k").mkdir()
+            (Path(home) / ".k/config.toml").write_text("[broken", encoding="utf-8")
+            self.assertEqual(main.load_config(), {})
+
     def test_new_session_id_returns_formatted_stamp(self):
         sid = main.new_session_id()
         # Format: YYYYMMDD-HHMMSS-xxxxxx
