@@ -1366,13 +1366,6 @@ class AgentTests(unittest.TestCase):
             self.assertTrue((Path(d) / ".k" / "sessions" / "abc123.json").exists())
             self.assertEqual(main.load_session("abc123"), session)
 
-    def test_handle_command_recognizes_quit(self):
-        self.assertEqual(main.handle_command("/quit"), "quit")
-
-    def test_handle_command_rejects_unknown_commands(self):
-        self.assertEqual(main.handle_command("/wat"), "Unknown command: /wat")
-        self.assertIsNone(main.handle_command("write a file"))
-
     def test_available_skills_lists_user_skills(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(main, "USER_SKILLS_DIR", Path(directory)):
             (Path(directory) / "coding" / "SKILL.md").parent.mkdir(exist_ok=True)

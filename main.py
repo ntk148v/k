@@ -5,7 +5,7 @@ import difflib
 import fnmatch
 import json
 import re
-import readline  # noqa: F401
+import readline
 import os
 import shutil
 import subprocess
@@ -968,14 +968,6 @@ def command_help() -> str:
     return "Available commands:\n" + "\n".join(f"  {usage:<{width}}  {description}" for _, usage, description in COMMAND_HELP)
 
 
-def handle_command(text: str) -> str | None:
-    if not text.startswith("/"):
-        return None
-    if text == "/quit":
-        return "quit"
-    return f"Unknown command: {text.split()[0]}"
-
-
 class StreamAssembler:
     def __init__(self) -> None:
         self._text_parts: list[str] = []
@@ -1047,7 +1039,7 @@ def _trim_history(history: list) -> list:
 
 
 def _stream_responses_turn(
-    client: OpenAI, model: str, instructions: str, history: list[object], quiet: bool, on_text: object = None
+    client: OpenAI, model: str, instructions: str, history: list[object], on_text: object = None
 ) -> tuple[str, list[dict[str, str]]]:
     assembler = StreamAssembler()
     events = client.responses.create(model=model, instructions=instructions, input=list(_trim_history(history)), tools=TOOLS, stream=True)
@@ -1070,7 +1062,7 @@ def _stream_responses_turn(
 
 
 def _stream_chat_turn(
-    client: OpenAI, model: str, instructions: str, history: list[object], quiet: bool, on_text: object = None
+    client: OpenAI, model: str, instructions: str, history: list[object], on_text: object = None
 ) -> tuple[str, list[dict[str, str]]]:
     assembler = StreamAssembler()
     stream_response = client.chat.completions.create(
@@ -1117,7 +1109,7 @@ def run_responses_agent(
         if on_activity:
             on_activity("thinking")
         if stream:
-            text, streamed_calls = _stream_responses_turn(client, model, instructions, history, quiet, on_text)
+            text, streamed_calls = _stream_responses_turn(client, model, instructions, history, on_text)
             if not streamed_calls:
                 history.append({"role": "assistant", "content": text})
                 return text, total_tokens, context_tokens, _trim_history(history)
@@ -1191,7 +1183,7 @@ def run_chat_agent(
         if on_activity:
             on_activity("thinking")
         if stream:
-            text, streamed_calls = _stream_chat_turn(client, model, instructions, history, quiet, on_text)
+            text, streamed_calls = _stream_chat_turn(client, model, instructions, history, on_text)
             if not streamed_calls:
                 history.append({"role": "assistant", "content": text})
                 return text, total_tokens, context_tokens, _trim_history(history)
