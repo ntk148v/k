@@ -508,6 +508,7 @@ def new_session_from(session: dict) -> dict:
         "skills": list(session.get("skills", [])),
         "api_mode": session.get("api_mode", API_MODE),
         "permission_mode": session.get("permission_mode", "review"),
+        "display_mode": session.get("display_mode", "formatted"),
         "model": session.get("model", MODEL),
         "title": "",
         "forked_from": None,
@@ -554,6 +555,7 @@ def ensure_session_defaults(session: dict) -> dict:
     session.setdefault("skills", [])
     session.setdefault("api_mode", API_MODE)
     session.setdefault("permission_mode", "review")
+    session.setdefault("display_mode", "formatted")
     session.setdefault("model", MODEL)
     session.setdefault("title", "")
     session.setdefault("cwd", "")
@@ -677,9 +679,7 @@ Guidelines:
 - Show file paths clearly when working with files"""
 
 
-def dispatch_tool(
-    name: str, arguments: str, call_id: str, session_id: str | None = None, *, confirm_bash: object = None, on_activity: object = None
-) -> dict:
+def dispatch_tool(name: str, arguments: str, call_id: str, session_id: str | None = None, *, confirm_bash: object = None, on_activity: object = None) -> dict:
     try:
         args = json.loads(arguments)
     except json.JSONDecodeError as e:
@@ -888,6 +888,12 @@ def validate_permission_mode(mode: object) -> str:
     return str(mode)
 
 
+def validate_display_mode(mode: object) -> str:
+    if mode not in {"formatted", "stream"}:
+        raise ValueError("display must be 'formatted' or 'stream'")
+    return str(mode)
+
+
 def confirm_bash(command: str, mode: str) -> bool:
     if validate_permission_mode(mode) == "yolo":
         return True
@@ -985,6 +991,7 @@ def run_agent(
     quiet: bool = False,
     api_mode: str | None = None,
     stream: bool = False,
+    on_text: object = None,
 ) -> tuple[str, int, int | None, list[object]]:
     instructions, missing = skill_instructions(skills or [])
     selected_api_mode = api_mode or API_MODE
@@ -992,9 +999,13 @@ def run_agent(
         if not quiet:
             render("info", f"Warning: skill '{name}' not found, skipping")
     if selected_api_mode == "responses":
-        return run_responses_agent(task, client, instructions, history, session_id, model=model, confirm_bash=confirm_bash, on_activity=on_activity, quiet=quiet, stream=stream)
+        return run_responses_agent(
+            task, client, instructions, history, session_id, model=model, confirm_bash=confirm_bash, on_activity=on_activity, quiet=quiet, stream=stream, on_text=on_text
+        )
     if selected_api_mode == "chat-completions":
-        return run_chat_agent(task, client, instructions, history, session_id, model=model, confirm_bash=confirm_bash, on_activity=on_activity, quiet=quiet, stream=stream)
+        return run_chat_agent(
+            task, client, instructions, history, session_id, model=model, confirm_bash=confirm_bash, on_activity=on_activity, quiet=quiet, stream=stream, on_text=on_text
+        )
     raise RuntimeError("K_API_MODE must be 'responses' or 'chat-completions'")
 
 
@@ -1013,31 +1024,44 @@ def _trim_history(history: list) -> list:
     return trimmed
 
 
-def _stream_responses_turn(client: OpenAI, model: str, instructions: str, history: list[object], quiet: bool) -> tuple[str, list[dict[str, str]]]:
+def _stream_responses_turn(
+    client: OpenAI, model: str, instructions: str, history: list[object], quiet: bool, on_text: object = None
+) -> tuple[str, list[dict[str, str]]]:
     assembler = StreamAssembler()
     events = client.responses.create(model=model, instructions=instructions, input=list(_trim_history(history)), tools=TOOLS, stream=True)
     for event in events:
         kind = getattr(event, "type", "")
         if kind == "response.output_text.delta":
-            assembler.consume({"type": "text_delta", "text": getattr(event, "delta", "")})
+            delta = getattr(event, "delta", "")
+            assembler.consume({"type": "text_delta", "text": delta})
+            if on_text:
+                on_text(delta)
         elif kind == "response.output_item.added":
             item = getattr(event, "item", None)
             if getattr(item, "type", "") == "function_call":
-                assembler.consume({"type": "tool_start", "index": getattr(event, "output_index", 0), "id": getattr(item, "call_id", ""), "name": getattr(item, "name", "")})
+                assembler.consume(
+                    {"type": "tool_start", "index": getattr(event, "output_index", 0), "id": getattr(item, "call_id", ""), "name": getattr(item, "name", "")}
+                )
         elif kind == "response.function_call_arguments.delta":
             assembler.consume({"type": "tool_arguments_delta", "index": getattr(event, "output_index", 0), "arguments": getattr(event, "delta", "")})
     return assembler.text(), assembler.tool_calls()
 
 
-def _stream_chat_turn(client: OpenAI, model: str, instructions: str, history: list[object], quiet: bool) -> tuple[str, list[dict[str, str]]]:
+def _stream_chat_turn(
+    client: OpenAI, model: str, instructions: str, history: list[object], quiet: bool, on_text: object = None
+) -> tuple[str, list[dict[str, str]]]:
     assembler = StreamAssembler()
-    stream_response = client.chat.completions.create(model=model, messages=[{"role": "system", "content": instructions}, *_trim_history(history)], tools=CHAT_TOOLS, stream=True)
+    stream_response = client.chat.completions.create(
+        model=model, messages=[{"role": "system", "content": instructions}, *_trim_history(history)], tools=CHAT_TOOLS, stream=True
+    )
     for chunk in stream_response:
         choice = chunk.choices[0]
         delta = choice.delta
         text = getattr(delta, "content", None)
         if text:
             assembler.consume({"type": "text_delta", "text": text})
+            if on_text:
+                on_text(text)
         for call in getattr(delta, "tool_calls", None) or []:
             index = getattr(call, "index", 0)
             function = getattr(call, "function", None)
@@ -1060,6 +1084,7 @@ def run_responses_agent(
     on_activity: object = None,
     quiet: bool = False,
     stream: bool = False,
+    on_text: object = None,
 ) -> tuple[str, int, int | None, list[object]]:
     history = list(history or [])
     history.append({"role": "user", "content": task})
@@ -1070,7 +1095,7 @@ def run_responses_agent(
         if on_activity:
             on_activity("thinking")
         if stream:
-            text, streamed_calls = _stream_responses_turn(client, model, instructions, history, quiet)
+            text, streamed_calls = _stream_responses_turn(client, model, instructions, history, quiet, on_text)
             if not streamed_calls:
                 history.append({"role": "assistant", "content": text})
                 return text, total_tokens, context_tokens, _trim_history(history)
@@ -1102,9 +1127,7 @@ def run_responses_agent(
         if tool_turns > MAX_AGENT_TOOL_TURNS:
             raise RuntimeError(f"agent exceeded {MAX_AGENT_TOOL_TURNS} tool turns")
         history.extend(output)
-        history.extend(
-            dispatch_tool(call.name, call.arguments, call.call_id, session_id, confirm_bash=confirm_bash, on_activity=on_activity) for call in calls
-        )
+        history.extend(dispatch_tool(call.name, call.arguments, call.call_id, session_id, confirm_bash=confirm_bash, on_activity=on_activity) for call in calls)
         if not quiet:
             for call in calls:
                 render("tool", f"{call.name}({call.arguments})")
@@ -1122,6 +1145,7 @@ def run_chat_agent(
     on_activity: object = None,
     quiet: bool = False,
     stream: bool = False,
+    on_text: object = None,
 ) -> tuple[str, int, int | None, list[object]]:
     saved_history = list(history or [])
     history = []
@@ -1145,21 +1169,25 @@ def run_chat_agent(
         if on_activity:
             on_activity("thinking")
         if stream:
-            text, streamed_calls = _stream_chat_turn(client, model, instructions, history, quiet)
+            text, streamed_calls = _stream_chat_turn(client, model, instructions, history, quiet, on_text)
             if not streamed_calls:
                 history.append({"role": "assistant", "content": text})
                 return text, total_tokens, context_tokens, _trim_history(history)
             tool_turns += 1
             if tool_turns > MAX_AGENT_TOOL_TURNS:
                 raise RuntimeError(f"agent exceeded {MAX_AGENT_TOOL_TURNS} tool turns")
-            assistant_calls = [{"id": call["id"], "type": "function", "function": {"name": call["name"], "arguments": call["arguments"]}} for call in streamed_calls]
+            assistant_calls = [
+                {"id": call["id"], "type": "function", "function": {"name": call["name"], "arguments": call["arguments"]}} for call in streamed_calls
+            ]
             history.append({"role": "assistant", "content": None, "tool_calls": assistant_calls})
             for call in streamed_calls:
                 call_id = call["id"] or f"stream-{tool_turns}"
                 result = dispatch_tool(call["name"], call["arguments"], call_id, session_id, confirm_bash=confirm_bash, on_activity=on_activity)
                 history.append({"role": "tool", "tool_call_id": call_id, "content": result["output"]})
             continue
-        response = client.chat.completions.create(model=model, messages=[{"role": "system", "content": instructions}, *_trim_history(history)], tools=CHAT_TOOLS)
+        response = client.chat.completions.create(
+            model=model, messages=[{"role": "system", "content": instructions}, *_trim_history(history)], tools=CHAT_TOOLS
+        )
         choices = getattr(response, "choices", None)
         if not isinstance(choices, list) or not choices:
             raise RuntimeError("provider response is malformed")
@@ -1195,9 +1223,7 @@ def run_chat_agent(
         if tool_turns > MAX_AGENT_TOOL_TURNS:
             raise RuntimeError(f"agent exceeded {MAX_AGENT_TOOL_TURNS} tool turns")
         for call in calls:
-            result = dispatch_tool(
-                call.function.name, call.function.arguments, call.id, session_id, confirm_bash=confirm_bash, on_activity=on_activity
-            )
+            result = dispatch_tool(call.function.name, call.function.arguments, call.id, session_id, confirm_bash=confirm_bash, on_activity=on_activity)
             history.append({"role": "tool", "tool_call_id": call.id, "content": result["output"]})
             if not quiet:
                 render("tool", f"{call.function.name}({call.function.arguments})")
@@ -1214,6 +1240,7 @@ def main() -> None:
     parser.add_argument("-p", "--print", dest="print_prompt", nargs="?", const="")
     parser.add_argument("--theme", choices=PALETTES, default=os.getenv("K_THEME", "light"))
     parser.add_argument("--mode", choices=("review", "yolo"), help="bash permission mode")
+    parser.add_argument("--display", choices=("formatted", "stream"), help="response display mode")
     args, extra = parser.parse_known_args()
     set_theme(args.theme)
     session = {"id": new_session_id(), "history": [], "transcript": [], "skills": [], "api_mode": API_MODE, "model": MODEL, "title": ""}
@@ -1233,6 +1260,7 @@ def main() -> None:
     selected_api_mode = os.getenv("K_API_MODE") or defaults.get("api_mode") or API_MODE
     try:
         selected_permission_mode = validate_permission_mode(args.mode or defaults.get("permission_mode") or "review")
+        selected_display_mode = validate_display_mode(args.display or defaults.get("display") or "formatted")
     except ValueError as error:
         parser.error(str(error))
     if selected_api_mode not in {"responses", "chat-completions"}:
@@ -1242,6 +1270,7 @@ def main() -> None:
     session["model"] = selected_model
     session["api_mode"] = selected_api_mode
     session["permission_mode"] = selected_permission_mode
+    session["display_mode"] = selected_display_mode
 
     if args.print_prompt is not None:
         prompt = args.print_prompt or " ".join(extra) or (sys.stdin.read() if not sys.stdin.isatty() else "")
@@ -1327,6 +1356,19 @@ def main() -> None:
                             save_session(session)
                             render("info", f"Permission mode set to {mode}")
                     continue
+                if command == "/display":
+                    display = task.removeprefix("/display").strip()
+                    if not display:
+                        render("info", f"Display mode: {session['display_mode']}")
+                    else:
+                        try:
+                            session["display_mode"] = validate_display_mode(display)
+                        except ValueError:
+                            render("output", "Usage: /display <formatted|stream>")
+                        else:
+                            save_session(session)
+                            render("info", f"Display mode set to {display}")
+                    continue
                 if command == "/model":
                     model = task.removeprefix("/model").strip()
                     if not model:
@@ -1385,7 +1427,16 @@ def main() -> None:
             if not session["title"]:
                 session["title"] = " ".join(task.split())[:72]
             checkpoint = begin_undo_checkpoint()
-            streaming = True
+            streaming = session["display_mode"] == "stream"
+            stream_state = [False]
+
+            def on_stream_text(text: str) -> None:
+                if not stream_state[0]:
+                    sys.stdout.write(f"\n{color('accent')}│ {color('text')}")
+                    stream_state[0] = True
+                sys.stdout.write(text)
+                sys.stdout.flush()
+
             try:
                 answer, total_tokens, context_tokens, history = run_agent(
                     task,
@@ -1398,7 +1449,11 @@ def main() -> None:
                     api_mode=session.get("api_mode"),
                     on_activity=on_activity,
                     stream=streaming,
+                    on_text=on_stream_text if streaming else None,
                 )
+                if streaming and stream_state[0]:
+                    sys.stdout.write(f"{RESET}\n")
+                    sys.stdout.flush()
                 session["history"] = history
                 session["transcript"].append({"prompt": task, "answer": answer})
                 session["undo"] = finish_undo_checkpoint(checkpoint)
@@ -1407,7 +1462,8 @@ def main() -> None:
                 render("output", f"Error: {e}")
                 render_pinned_status(status_line("?", None, session["model"]))
                 continue
-            render("answer", answer)
+            if not streaming:
+                render("answer", answer)
             render_pinned_status(status_line(total_tokens, context_tokens, session["model"]))
     except KeyboardInterrupt:
         return

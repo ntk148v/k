@@ -619,6 +619,20 @@ class AgentTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             main.validate_permission_mode("maybe")
 
+    def test_display_mode_rejects_unknown_value(self):
+        with self.assertRaises(ValueError):
+            main.validate_display_mode("maybe")
+
+    def test_stream_emits_text_deltas_to_callback(self):
+        events = [
+            SimpleNamespace(type="response.output_text.delta", delta="hello"),
+            SimpleNamespace(type="response.output_text.delta", delta=" world"),
+        ]
+        client = SimpleNamespace(responses=SimpleNamespace(create=Mock(return_value=events)))
+        chunks = []
+        main.run_agent("say hello", client, stream=True, quiet=True, on_text=chunks.append)
+        self.assertEqual(chunks, ["hello", " world"])
+
     def test_stream_assembler_joins_tool_argument_deltas(self):
         assembler = main.StreamAssembler()
         assembler.consume({"type": "tool_start", "index": 0, "id": "c1", "name": "read"})
@@ -1204,6 +1218,22 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(save.call_args.args[0]["cwd"], str(Path.cwd()))
         self.assertIn(("info", "Resumed saved-id"), [call.args for call in render.call_args_list])
         self.assertTrue(any("model: provider/model-x" in call.args[0] for call in status.call_args_list))
+
+    def test_main_sets_and_persists_display_mode(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(main.Path, "home", return_value=Path(directory)):
+            with (
+                patch("builtins.input", side_effect=["/display stream", "hello", ""]),
+                patch.object(main, "OpenAI"),
+                patch.object(main, "new_session_id", return_value="display-id"),
+                patch.object(main, "begin_undo_checkpoint", return_value=None),
+                patch.object(main, "finish_undo_checkpoint", return_value=None),
+                patch.object(main, "run_agent", return_value=("hi", 1, 1, [])),
+                patch.object(main, "render_pinned_status", return_value=True),
+                patch.object(main, "restore_terminal"),
+                patch.object(main, "render"),
+            ):
+                main.main()
+            self.assertEqual(main.load_session("display-id")["display_mode"], "stream")
 
     def test_main_sets_and_persists_permission_mode(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(main.Path, "home", return_value=Path(directory)):
