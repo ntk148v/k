@@ -308,6 +308,43 @@ class PromptTests(unittest.TestCase):
         self.assertNotIn("## Project instructions", missing_instructions)
         self.assertNotIn("## Project instructions", oversized_instructions)
 
+    def test_project_instructions_load_global_root_then_cwd(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            child = root / "child"
+            child.mkdir()
+            home = root / "home"
+            (home / ".k").mkdir(parents=True)
+            (home / ".k" / "AGENTS.md").write_text("global", encoding="utf-8")
+            (root / "AGENTS.md").write_text("root", encoding="utf-8")
+            (child / "AGENTS.md").write_text("child", encoding="utf-8")
+            previous = Path.cwd()
+            try:
+                os.chdir(child)
+                with patch.object(main.Path, "home", return_value=home), patch.object(main, "_git_root", return_value=str(root)):
+                    instructions = main.project_instructions()
+            finally:
+                os.chdir(previous)
+        self.assertLess(instructions.index("global"), instructions.index("root"))
+        self.assertLess(instructions.index("root"), instructions.index("child"))
+
+    def test_project_instructions_outside_git_omits_parent_agents_md(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            child = root / "child"
+            child.mkdir()
+            (root / "AGENTS.md").write_text("parent", encoding="utf-8")
+            (child / "AGENTS.md").write_text("child", encoding="utf-8")
+            previous = Path.cwd()
+            try:
+                os.chdir(child)
+                with patch.object(main.Path, "home", return_value=root / "home"), patch.object(main, "_git_root", return_value=None):
+                    instructions = main.project_instructions()
+            finally:
+                os.chdir(previous)
+        self.assertIn("child", instructions)
+        self.assertNotIn("parent", instructions)
+
     def test_skill_instructions_omits_invalid_utf8_agents_md(self):
         with tempfile.TemporaryDirectory() as directory:
             previous = Path.cwd()

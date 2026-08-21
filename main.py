@@ -52,6 +52,7 @@ GREP_IGNORED_DIRS = {".git", ".venv", "node_modules", "dist", "__pycache__"}
 MAX_GREP_FILES = 2_000
 MAX_GREP_MATCHES = 2_000
 PROJECT_INSTRUCTIONS_MAX_BYTES = 16 * 1024
+PROJECT_INSTRUCTIONS_TOTAL_BYTES = 48 * 1024
 READ_STAMPS: dict[Path, tuple[int, int]] = {}
 
 
@@ -331,15 +332,36 @@ MAX_TOOL_OUTPUT_CHARS = 12_000
 USER_SKILLS_DIR = Path.home() / ".agents" / "skills"
 
 
+def project_instruction_paths() -> list[Path]:
+    cwd = Path.cwd().resolve()
+    paths = [Path.home() / ".k" / "AGENTS.md"]
+    root_text = _git_root()
+    if root_text:
+        root = Path(root_text).resolve()
+        if cwd == root or root in cwd.parents:
+            paths.extend(root / relative / "AGENTS.md" for relative in reversed(cwd.relative_to(root).parents))
+            paths.append(cwd / "AGENTS.md")
+            return list(dict.fromkeys(paths))
+    paths.append(cwd / "AGENTS.md")
+    return list(dict.fromkeys(paths))
+
+
 def project_instructions() -> str:
-    path = Path.cwd() / "AGENTS.md"
-    try:
-        if not path.is_file() or path.stat().st_size > PROJECT_INSTRUCTIONS_MAX_BYTES:
-            return ""
-        content = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError):
-        return ""
-    return f"\n\n## Project instructions\n\n{content}"
+    blocks = []
+    total = 0
+    for path in project_instruction_paths():
+        try:
+            if not path.is_file() or path.stat().st_size > PROJECT_INSTRUCTIONS_MAX_BYTES:
+                continue
+            content = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            continue
+        block = f"\n## {path}\n\n{content}"
+        if total + len(block.encode()) > PROJECT_INSTRUCTIONS_TOTAL_BYTES:
+            break
+        blocks.append(block)
+        total += len(block.encode())
+    return "\n\n## Project instructions\n" + "".join(blocks) if blocks else ""
 
 
 def available_skills() -> dict[str, Path]:

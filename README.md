@@ -299,7 +299,7 @@ Run `uv run python -m unittest -v` before reporting completion.
 Do not modify generated files under `dist/`.
 ```
 
-`k` reads only that file, up to 16 KiB, for each request. It does not search parent directories.
+`k` reads the global `~/.k/AGENTS.md`, repository-root instructions, and narrower `AGENTS.md` files down to the current directory. Each file is capped at 16 KiB and the combined context at 48 KiB.
 
 ### 8. Package, Provider, and Input Support
 
