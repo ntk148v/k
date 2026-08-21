@@ -1348,6 +1348,7 @@ def main() -> None:
             if not session["title"]:
                 session["title"] = " ".join(task.split())[:72]
             checkpoint = begin_undo_checkpoint()
+            streaming = True
             try:
                 answer, total_tokens, context_tokens, history = run_agent(
                     task,
@@ -1359,7 +1360,7 @@ def main() -> None:
                     confirm_bash=confirm_bash,
                     api_mode=session.get("api_mode"),
                     on_activity=on_activity,
-                    stream=True,
+                    stream=streaming,
                 )
                 session["history"] = history
                 session["transcript"].append({"prompt": task, "answer": answer})
@@ -1369,7 +1370,8 @@ def main() -> None:
                 render("output", f"Error: {e}")
                 render_pinned_status(status_line("?", None, session["model"]))
                 continue
-            render("answer", answer)
+            if not (streaming and sys.stdout.isatty()):
+                render("answer", answer)
             render_pinned_status(status_line(total_tokens, context_tokens, session["model"]))
     except KeyboardInterrupt:
         return
