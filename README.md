@@ -119,6 +119,7 @@ Skills are Markdown files in `~/.agents/skills/<name>/SKILL.md`. They act as add
 | `/resume`             | List up to 20 recent sessions                                |
 | `/resume <id>`        | Switch to a saved session                                    |
 | `/model <model-name>` | Set and persist this session's model                         |
+| `/mode <review|yolo>` | Set bash permission mode for this session                   |
 | `/undo`               | Revert the last completed agent turn in a clean Git worktree |
 | `/skills`             | List available skills                                        |
 | `/skill <name>`       | Load a skill for this session                                |
@@ -132,16 +133,17 @@ Sessions are saved automatically after every completed answer. Use `/resume` to 
 uv run python main.py --resume <session-id>
 ```
 
-Use `/model <model-name>` to change and persist the active session's model. While the agent works, the pinned status temporarily shows `thinking` and the active tool name.
+Use `/model <model-name>` to change and persist the active session's model. Use `/mode review` for visible per-command approval or `/mode yolo` to run bash tools without prompts. The default is `review`; the approval prompt shows the exact command. While the agent works, the pinned status temporarily shows `thinking` and the active tool name.
 
-**Safety:** The `read`, `write`, and `edit` tools resolve every path against the current working directory and reject anything outside it, including symlink escapes. `bash` is not sandboxed, so every shell command requires interactive per-command approval (`Allow bash command? [y/N]`), and noninteractive runs reject all shell commands. K is not a container or OS sandbox — run it only in environments you trust.
+**Safety:** The `read`, `write`, and `edit` tools resolve every path against the current working directory and reject anything outside it, including symlink escapes. `bash` is not sandboxed. In `review` mode, each shell command displays the exact command and requires approval; `yolo` mode skips approval. Noninteractive runs reject shell commands unless `--mode yolo` is explicit. K is not a container or OS sandbox — run it only in environments you trust.
 
 **Undo:** `/undo` works once, only after a task that began with a clean Git worktree. It preserves pre-existing files and declines if anything changed since the task.
 
 ### Themes
 
 ```bash
-uv run python main.py --theme dark        # dark mode
+uv run python main.py --theme dark --mode review
+uv run python main.py --mode yolo             # run bash without prompts
 OPENAI_MODEL_NAME=gpt-4o uv run python main.py  # custom model
 ```
 
@@ -161,6 +163,7 @@ Set defaults via environment variables or `~/.k/config.toml`:
 [defaults]
 model = "openrouter/free"
 api_mode = "responses"
+permission_mode = "review"
 base_url = "https://openrouter.ai/api/v1"
 
 [presets.fast]

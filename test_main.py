@@ -603,6 +603,22 @@ class ToolTests(unittest.TestCase):
 
 
 class AgentTests(unittest.TestCase):
+    def test_review_confirmation_shows_command(self):
+        with patch("builtins.input", return_value="y"), patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            stdout.isatty = Mock(return_value=True)
+            self.assertTrue(main.confirm_bash("git status", "review"))
+        self.assertIn("git status", stdout.getvalue())
+        self.assertIn("Allow bash command", stdout.getvalue())
+
+    def test_yolo_confirmation_skips_prompt(self):
+        with patch("builtins.input") as ask:
+            self.assertTrue(main.confirm_bash("rm -rf build", "yolo"))
+        ask.assert_not_called()
+
+    def test_permission_mode_rejects_unknown_value(self):
+        with self.assertRaises(ValueError):
+            main.validate_permission_mode("maybe")
+
     def test_stream_assembler_joins_tool_argument_deltas(self):
         assembler = main.StreamAssembler()
         assembler.consume({"type": "tool_start", "index": 0, "id": "c1", "name": "read"})
@@ -1178,6 +1194,22 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(save.call_args.args[0]["cwd"], str(Path.cwd()))
         self.assertIn(("info", "Resumed saved-id"), [call.args for call in render.call_args_list])
         self.assertTrue(any("model: provider/model-x" in call.args[0] for call in status.call_args_list))
+
+    def test_main_sets_and_persists_permission_mode(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(main.Path, "home", return_value=Path(directory)):
+            with (
+                patch("builtins.input", side_effect=["/mode yolo", "hello", ""]),
+                patch.object(main, "OpenAI"),
+                patch.object(main, "new_session_id", return_value="mode-id"),
+                patch.object(main, "begin_undo_checkpoint", return_value=None),
+                patch.object(main, "finish_undo_checkpoint", return_value=None),
+                patch.object(main, "run_agent", return_value=("hi", 1, 1, [])),
+                patch.object(main, "render_pinned_status", return_value=True),
+                patch.object(main, "restore_terminal"),
+                patch.object(main, "render"),
+            ):
+                main.main()
+            self.assertEqual(main.load_session("mode-id")["permission_mode"], "yolo")
 
     def test_main_sets_and_persists_session_model(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(main.Path, "home", return_value=Path(directory)):

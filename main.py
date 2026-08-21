@@ -507,6 +507,7 @@ def new_session_from(session: dict) -> dict:
         "transcript": [],
         "skills": list(session.get("skills", [])),
         "api_mode": session.get("api_mode", API_MODE),
+        "permission_mode": session.get("permission_mode", "review"),
         "model": session.get("model", MODEL),
         "title": "",
         "forked_from": None,
@@ -552,6 +553,7 @@ def session_path(session_id: str) -> Path:
 def ensure_session_defaults(session: dict) -> dict:
     session.setdefault("skills", [])
     session.setdefault("api_mode", API_MODE)
+    session.setdefault("permission_mode", "review")
     session.setdefault("model", MODEL)
     session.setdefault("title", "")
     session.setdefault("cwd", "")
@@ -878,6 +880,20 @@ def render(kind: str, text: str) -> None:
         else:
             sys.stdout.write(f"{text}\n")
     sys.stdout.flush()
+
+
+def validate_permission_mode(mode: object) -> str:
+    if mode not in {"review", "yolo"}:
+        raise ValueError("permission_mode must be 'review' or 'yolo'")
+    return str(mode)
+
+
+def confirm_bash(command: str, mode: str) -> bool:
+    if validate_permission_mode(mode) == "yolo":
+        return True
+    sys.stdout.write(f"\n{color('heading')}Allow bash command?{color('text')}\n{color('tool')}$ {command}{color('text')}\n")
+    sys.stdout.flush()
+    return input("[y/N] ").strip().lower() == "y"
 
 
 def render_pinned_status(text: str, *, move_cursor: bool = False) -> bool:
@@ -1207,6 +1223,7 @@ def main() -> None:
     parser.add_argument("--resume", metavar="ID")
     parser.add_argument("-p", "--print", dest="print_prompt", nargs="?", const="")
     parser.add_argument("--theme", choices=PALETTES, default=os.getenv("K_THEME", "light"))
+    parser.add_argument("--mode", choices=("review", "yolo"), help="bash permission mode")
     args, extra = parser.parse_known_args()
     set_theme(args.theme)
     session = {"id": new_session_id(), "history": [], "transcript": [], "skills": [], "api_mode": API_MODE, "model": MODEL, "title": ""}
@@ -1224,25 +1241,42 @@ def main() -> None:
         defaults = {}
     selected_model = os.getenv("OPENAI_MODEL_NAME") or defaults.get("model") or MODEL
     selected_api_mode = os.getenv("K_API_MODE") or defaults.get("api_mode") or API_MODE
+    try:
+        selected_permission_mode = validate_permission_mode(args.mode or defaults.get("permission_mode") or "review")
+    except ValueError as error:
+        parser.error(str(error))
     if selected_api_mode not in {"responses", "chat-completions"}:
         parser.error("api_mode must be 'responses' or 'chat-completions'")
     base_url = defaults.get("base_url")
     client = OpenAI(base_url=base_url) if isinstance(base_url, str) and base_url else OpenAI()
     session["model"] = selected_model
     session["api_mode"] = selected_api_mode
+    session["permission_mode"] = selected_permission_mode
 
     if args.print_prompt is not None:
         prompt = args.print_prompt or " ".join(extra) or (sys.stdin.read() if not sys.stdin.isatty() else "")
         if not prompt.strip():
             parser.error("-p requires a prompt or piped stdin")
-        answer, _, _, _ = run_agent(prompt, client, session["history"], session["id"], session.get("skills", []), model=session["model"], quiet=True, api_mode=session["api_mode"])
+        answer, _, _, _ = run_agent(
+            prompt,
+            client,
+            session["history"],
+            session["id"],
+            session.get("skills", []),
+            model=session["model"],
+            quiet=True,
+            api_mode=session["api_mode"],
+            confirm_bash=(lambda _: True) if selected_permission_mode == "yolo" else None,
+        )
         print(answer)
         return
 
-    def confirm_bash(command: str) -> bool:
+    def allow_bash(command: str) -> bool:
+        if session["permission_mode"] == "yolo":
+            return True
         if not sys.stdin.isatty() or not sys.stdout.isatty():
             return False
-        return input("Allow bash command? [y/N] ").strip().lower() == "y"
+        return confirm_bash(command, session["permission_mode"])
 
     def on_activity(activity: str) -> None:
         render_pinned_status(status_line("?", None, session["model"], activity))
@@ -1289,6 +1323,19 @@ def main() -> None:
                             render_pinned_status(status_line("?", None, session["model"]))
                     else:
                         render("output", "Usage: /resume [session-id]")
+                    continue
+                if command == "/mode":
+                    mode = task.removeprefix("/mode").strip()
+                    if not mode:
+                        render("info", f"Permission mode: {session['permission_mode']}")
+                    else:
+                        try:
+                            session["permission_mode"] = validate_permission_mode(mode)
+                        except ValueError:
+                            render("output", "Usage: /mode <review|yolo>")
+                        else:
+                            save_session(session)
+                            render("info", f"Permission mode set to {mode}")
                     continue
                 if command == "/model":
                     model = task.removeprefix("/model").strip()
@@ -1357,7 +1404,7 @@ def main() -> None:
                     session["id"],
                     session.get("skills", []),
                     model=session["model"],
-                    confirm_bash=confirm_bash,
+                    confirm_bash=allow_bash,
                     api_mode=session.get("api_mode"),
                     on_activity=on_activity,
                     stream=streaming,
