@@ -932,6 +932,30 @@ def handle_command(text: str) -> str | None:
     return f"Unknown command: {text.split()[0]}"
 
 
+class StreamAssembler:
+    def __init__(self) -> None:
+        self._text_parts: list[str] = []
+        self._calls: dict[int, dict[str, str]] = {}
+
+    def consume(self, event: dict[str, object]) -> None:
+        kind = event.get("type")
+        if kind == "text_delta":
+            self._text_parts.append(str(event.get("text", "")))
+        elif kind == "tool_start":
+            index = int(event.get("index", 0))
+            self._calls[index] = {"id": str(event.get("id", "")), "name": str(event.get("name", "")), "arguments": ""}
+        elif kind == "tool_arguments_delta":
+            index = int(event.get("index", 0))
+            call = self._calls.setdefault(index, {"id": "", "name": "", "arguments": ""})
+            call["arguments"] += str(event.get("arguments", ""))
+
+    def text(self) -> str:
+        return "".join(self._text_parts)
+
+    def tool_calls(self) -> list[dict[str, str]]:
+        return [self._calls[index] for index in sorted(self._calls)]
+
+
 def run_agent(
     task: str,
     client: OpenAI,
@@ -944,6 +968,7 @@ def run_agent(
     on_activity: object = None,
     quiet: bool = False,
     api_mode: str | None = None,
+    stream: bool = False,
 ) -> tuple[str, int, int | None, list[object]]:
     instructions, missing = skill_instructions(skills or [])
     selected_api_mode = api_mode or API_MODE
@@ -951,9 +976,9 @@ def run_agent(
         if not quiet:
             render("info", f"Warning: skill '{name}' not found, skipping")
     if selected_api_mode == "responses":
-        return run_responses_agent(task, client, instructions, history, session_id, model=model, confirm_bash=confirm_bash, on_activity=on_activity, quiet=quiet)
+        return run_responses_agent(task, client, instructions, history, session_id, model=model, confirm_bash=confirm_bash, on_activity=on_activity, quiet=quiet, stream=stream)
     if selected_api_mode == "chat-completions":
-        return run_chat_agent(task, client, instructions, history, session_id, model=model, confirm_bash=confirm_bash, on_activity=on_activity, quiet=quiet)
+        return run_chat_agent(task, client, instructions, history, session_id, model=model, confirm_bash=confirm_bash, on_activity=on_activity, quiet=quiet, stream=stream)
     raise RuntimeError("K_API_MODE must be 'responses' or 'chat-completions'")
 
 
@@ -972,6 +997,47 @@ def _trim_history(history: list) -> list:
     return trimmed
 
 
+def _stream_responses_turn(client: OpenAI, model: str, instructions: str, history: list[object], quiet: bool) -> tuple[str, list[dict[str, str]]]:
+    assembler = StreamAssembler()
+    events = client.responses.create(model=model, instructions=instructions, input=list(_trim_history(history)), tools=TOOLS, stream=True)
+    for event in events:
+        kind = getattr(event, "type", "")
+        if kind == "response.output_text.delta":
+            assembler.consume({"type": "text_delta", "text": getattr(event, "delta", "")})
+            if not quiet:
+                sys.stdout.write(getattr(event, "delta", ""))
+                sys.stdout.flush()
+        elif kind == "response.output_item.added":
+            item = getattr(event, "item", None)
+            if getattr(item, "type", "") == "function_call":
+                assembler.consume({"type": "tool_start", "index": getattr(event, "output_index", 0), "id": getattr(item, "call_id", ""), "name": getattr(item, "name", "")})
+        elif kind == "response.function_call_arguments.delta":
+            assembler.consume({"type": "tool_arguments_delta", "index": getattr(event, "output_index", 0), "arguments": getattr(event, "delta", "")})
+    return assembler.text(), assembler.tool_calls()
+
+
+def _stream_chat_turn(client: OpenAI, model: str, instructions: str, history: list[object], quiet: bool) -> tuple[str, list[dict[str, str]]]:
+    assembler = StreamAssembler()
+    stream_response = client.chat.completions.create(model=model, messages=[{"role": "system", "content": instructions}, *_trim_history(history)], tools=CHAT_TOOLS, stream=True)
+    for chunk in stream_response:
+        choice = chunk.choices[0]
+        delta = choice.delta
+        text = getattr(delta, "content", None)
+        if text:
+            assembler.consume({"type": "text_delta", "text": text})
+            if not quiet:
+                sys.stdout.write(text)
+                sys.stdout.flush()
+        for call in getattr(delta, "tool_calls", None) or []:
+            index = getattr(call, "index", 0)
+            function = getattr(call, "function", None)
+            if getattr(call, "id", None) or getattr(function, "name", None):
+                assembler.consume({"type": "tool_start", "index": index, "id": getattr(call, "id", ""), "name": getattr(function, "name", "")})
+            if getattr(function, "arguments", None):
+                assembler.consume({"type": "tool_arguments_delta", "index": index, "arguments": function.arguments})
+    return assembler.text(), assembler.tool_calls()
+
+
 def run_responses_agent(
     task: str,
     client: OpenAI,
@@ -983,6 +1049,7 @@ def run_responses_agent(
     confirm_bash: object = None,
     on_activity: object = None,
     quiet: bool = False,
+    stream: bool = False,
 ) -> tuple[str, int, int | None, list[object]]:
     history = list(history or [])
     history.append({"role": "user", "content": task})
@@ -992,6 +1059,21 @@ def run_responses_agent(
     while True:
         if on_activity:
             on_activity("thinking")
+        if stream:
+            text, streamed_calls = _stream_responses_turn(client, model, instructions, history, quiet)
+            if not streamed_calls:
+                if not quiet and text:
+                    sys.stdout.write("\n")
+                history.append({"role": "assistant", "content": text})
+                return text, total_tokens, context_tokens, _trim_history(history)
+            tool_turns += 1
+            if tool_turns > MAX_AGENT_TOOL_TURNS:
+                raise RuntimeError(f"agent exceeded {MAX_AGENT_TOOL_TURNS} tool turns")
+            for call in streamed_calls:
+                call_id = call["id"] or f"stream-{tool_turns}"
+                history.append({"type": "function_call", "call_id": call_id, "name": call["name"], "arguments": call["arguments"]})
+                history.append(dispatch_tool(call["name"], call["arguments"], call_id, session_id, confirm_bash=confirm_bash, on_activity=on_activity))
+            continue
         response = client.responses.create(model=model, instructions=instructions, input=list(_trim_history(history)), tools=TOOLS)
         output = getattr(response, "output", None)
         if not isinstance(output, list):
@@ -1031,6 +1113,7 @@ def run_chat_agent(
     confirm_bash: object = None,
     on_activity: object = None,
     quiet: bool = False,
+    stream: bool = False,
 ) -> tuple[str, int, int | None, list[object]]:
     saved_history = list(history or [])
     history = []
@@ -1053,6 +1136,23 @@ def run_chat_agent(
     while True:
         if on_activity:
             on_activity("thinking")
+        if stream:
+            text, streamed_calls = _stream_chat_turn(client, model, instructions, history, quiet)
+            if not streamed_calls:
+                if not quiet and text:
+                    sys.stdout.write("\n")
+                history.append({"role": "assistant", "content": text})
+                return text, total_tokens, context_tokens, _trim_history(history)
+            tool_turns += 1
+            if tool_turns > MAX_AGENT_TOOL_TURNS:
+                raise RuntimeError(f"agent exceeded {MAX_AGENT_TOOL_TURNS} tool turns")
+            assistant_calls = [{"id": call["id"], "type": "function", "function": {"name": call["name"], "arguments": call["arguments"]}} for call in streamed_calls]
+            history.append({"role": "assistant", "content": None, "tool_calls": assistant_calls})
+            for call in streamed_calls:
+                call_id = call["id"] or f"stream-{tool_turns}"
+                result = dispatch_tool(call["name"], call["arguments"], call_id, session_id, confirm_bash=confirm_bash, on_activity=on_activity)
+                history.append({"role": "tool", "tool_call_id": call_id, "content": result["output"]})
+            continue
         response = client.chat.completions.create(model=model, messages=[{"role": "system", "content": instructions}, *_trim_history(history)], tools=CHAT_TOOLS)
         choices = getattr(response, "choices", None)
         if not isinstance(choices, list) or not choices:
@@ -1259,6 +1359,7 @@ def main() -> None:
                     confirm_bash=confirm_bash,
                     api_mode=session.get("api_mode"),
                     on_activity=on_activity,
+                    stream=True,
                 )
                 session["history"] = history
                 session["transcript"].append({"prompt": task, "answer": answer})

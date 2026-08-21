@@ -603,6 +603,29 @@ class ToolTests(unittest.TestCase):
 
 
 class AgentTests(unittest.TestCase):
+    def test_stream_assembler_joins_tool_argument_deltas(self):
+        assembler = main.StreamAssembler()
+        assembler.consume({"type": "tool_start", "index": 0, "id": "c1", "name": "read"})
+        assembler.consume({"type": "tool_arguments_delta", "index": 0, "arguments": '{"path":"a'})
+        assembler.consume({"type": "tool_arguments_delta", "index": 0, "arguments": '.py"}'})
+        self.assertEqual(assembler.tool_calls()[0]["arguments"], '{"path":"a.py"}')
+
+    def test_stream_assembler_collects_text_deltas(self):
+        assembler = main.StreamAssembler()
+        assembler.consume({"type": "text_delta", "text": "hello "})
+        assembler.consume({"type": "text_delta", "text": "world"})
+        self.assertEqual(assembler.text(), "hello world")
+
+    def test_run_agent_streams_response_text_deltas(self):
+        events = [
+            SimpleNamespace(type="response.output_text.delta", delta="hello"),
+            SimpleNamespace(type="response.output_text.delta", delta=" world"),
+        ]
+        client = SimpleNamespace(responses=SimpleNamespace(create=Mock(return_value=events)))
+        answer, _, _, _ = main.run_agent("say hello", client, stream=True, quiet=True)
+        self.assertEqual(answer, "hello world")
+        self.assertTrue(client.responses.create.call_args.kwargs["stream"])
+
     def test_main_print_mode_writes_only_final_answer_to_stdout(self):
         with (
             patch.object(sys, "argv", ["k", "-p", "describe main"]),
