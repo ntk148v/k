@@ -198,23 +198,36 @@ def bash(command: str, timeout: int | None = None) -> str:
     effective_timeout = DEFAULT_BASH_TIMEOUT if timeout is None else timeout
     if not isinstance(effective_timeout, int) or not 1 <= effective_timeout <= DEFAULT_BASH_TIMEOUT:
         return f"Error: timeout must be between 1 and {DEFAULT_BASH_TIMEOUT}s"
+    process = None
     try:
-        result = subprocess.run(
+        process = subprocess.Popen(
             command,
             shell=True,
             cwd=os.getcwd(),
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            timeout=effective_timeout,
+            start_new_session=(os.name == "posix"),
             encoding="utf-8",
             errors="replace",
         )
-        if result.returncode != 0:
-            return f"[exit {result.returncode}]\n{result.stdout}"
-        return result.stdout
-    except subprocess.TimeoutExpired:
-        return f"Error: command timed out after {effective_timeout}s"
+        try:
+            stdout, _ = process.communicate(timeout=effective_timeout)
+        except subprocess.TimeoutExpired:
+            process.terminate()
+            try:
+                stdout, _ = process.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                stdout, _ = process.communicate()
+            return f"Error: command timed out after {effective_timeout}s"
+        except KeyboardInterrupt:
+            process.terminate()
+            process.wait()
+            return "Error: command interrupted"
+        if process.returncode != 0:
+            return f"[exit {process.returncode}]\n{stdout}"
+        return stdout
     except OSError as e:
         return f"Error: {e}"
 

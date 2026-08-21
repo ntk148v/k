@@ -500,16 +500,28 @@ class ToolTests(unittest.TestCase):
         self.assertTrue(main.read("definitely-missing-k-file.txt").startswith("Error: cannot read"))
         self.assertTrue(main.edit("definitely-missing-k-file.txt", "old", "new").startswith("Error: cannot edit"))
 
+    def test_bash_terminates_process_on_keyboard_interrupt(self):
+        process = Mock()
+        process.communicate.side_effect = KeyboardInterrupt
+        with patch.object(main.subprocess, "Popen", return_value=process):
+            self.assertEqual(main.bash("sleep 60"), "Error: command interrupted")
+        process.terminate.assert_called_once()
+        process.wait.assert_called()
+
     def test_bash_timeout_returns_error_message(self):
-        with patch.object(main.subprocess, "run", side_effect=main.subprocess.TimeoutExpired("cmd", 1)):
+        process = Mock()
+        process.communicate.side_effect = [main.subprocess.TimeoutExpired("cmd", 1), ("", None)]
+        with patch.object(main.subprocess, "Popen", return_value=process):
             result = main.bash("sleep 60", timeout=1)
         self.assertTrue(result.startswith("Error: command timed out"))
 
     def test_bash_uses_default_timeout(self):
-        with patch.object(main.subprocess, "run") as run:
-            run.return_value = SimpleNamespace(returncode=0, stdout="")
+        process = Mock()
+        process.communicate.return_value = ("", None)
+        process.returncode = 0
+        with patch.object(main.subprocess, "Popen", return_value=process):
             main.bash("echo hi")
-        self.assertEqual(run.call_args.kwargs["timeout"], main.DEFAULT_BASH_TIMEOUT)
+        self.assertEqual(process.communicate.call_args.args, ())
 
     def test_bash_rejects_invalid_timeout_before_running(self):
         with patch.object(main.subprocess, "run") as run:
@@ -518,7 +530,7 @@ class ToolTests(unittest.TestCase):
         self.assertIn("timeout must be between 1 and", result)
 
     def test_bash_oserror_returns_error_message(self):
-        with patch.object(main.subprocess, "run", side_effect=OSError("broken")):
+        with patch.object(main.subprocess, "Popen", side_effect=OSError("broken")):
             result = main.bash("anything")
         self.assertIn("Error:", result)
         self.assertIn("broken", result)
