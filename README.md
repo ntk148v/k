@@ -116,6 +116,7 @@ Skills are Markdown files in `~/.agents/skills/<name>/SKILL.md`. They act as add
 
 | Command               | Action                                                       |
 | --------------------- | ------------------------------------------------------------ |
+| `/help`               | Show all commands, descriptions, and usage                    |
 | `/resume`             | List up to 20 recent sessions                                |
 | `/resume <id>`        | Switch to a saved session                                    |
 | `/model <model-name>` | Set and persist this session's model                         |
@@ -134,7 +135,7 @@ Sessions are saved automatically after every completed answer. Use `/resume` to 
 uv run python main.py --resume <session-id>
 ```
 
-Use `/model <model-name>` to change and persist the active session's model. Use `/mode review` for visible per-command approval or `/mode yolo` to run bash tools without prompts. Use `/display formatted` for Markdown rendering after completion or `/display stream` for colored live output. The defaults are `review` and `formatted`; the approval prompt shows the exact command. While the agent works, the pinned status temporarily shows `thinking` and the active tool name.
+Use `/model <model-name>` to change and persist the active session's model. Use `/mode review` for visible per-command approval or `/mode yolo` to run bash tools without prompts. Use `/display formatted` for Markdown rendering after completion or `/display stream` for colored live output. Use `/help` to list all commands with descriptions and usage. The defaults are `review` and `formatted`; the approval prompt shows the exact command. While the agent works, the pinned status temporarily shows `thinking` and the active tool name.
 
 **Safety:** The `read`, `write`, and `edit` tools resolve every path against the current working directory and reject anything outside it, including symlink escapes. `bash` is not sandboxed. In `review` mode, each shell command displays the exact command and requires approval; `yolo` mode skips approval. Noninteractive runs reject shell commands unless `--mode yolo` is explicit. K is not a container or OS sandbox — run it only in environments you trust.
 

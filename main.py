@@ -946,6 +946,28 @@ def handle_skill_command(text: str, session: dict) -> str | None:
     return f"Loaded skill: {name}"
 
 
+COMMAND_HELP = (
+    ("/help", "/help", "Show this command list"),
+    ("/compact", "/compact [focus]", "Summarize the current session"),
+    ("/display", "/display <formatted|stream>", "Set response display mode"),
+    ("/fork", "/fork", "Fork the current session"),
+    ("/mode", "/mode <review|yolo>", "Set bash permission mode"),
+    ("/model", "/model <model-name>", "Set the session model"),
+    ("/new", "/new", "Start a fresh session"),
+    ("/preset", "/preset <name>", "Select a configured provider preset"),
+    ("/quit", "/quit", "Exit k"),
+    ("/resume", "/resume [session-id]", "List or resume a session"),
+    ("/skills", "/skills", "List available skills"),
+    ("/skill", "/skill <name|clear>", "Load or clear a skill"),
+    ("/undo", "/undo", "Undo the last completed turn"),
+)
+
+
+def command_help() -> str:
+    width = max(len(usage) for _, usage, _ in COMMAND_HELP)
+    return "Available commands:\n" + "\n".join(f"  {usage:<{width}}  {description}" for _, usage, description in COMMAND_HELP)
+
+
 def handle_command(text: str) -> str | None:
     if not text.startswith("/"):
         return None
@@ -1324,6 +1346,9 @@ def main() -> None:
             if task.startswith("/"):
                 parts = task.split()
                 command = parts[0]
+                if command == "/help":
+                    render("info", command_help())
+                    continue
                 if command == "/resume":
                     if len(parts) == 1:
                         render("info", format_session_list(list_sessions()))

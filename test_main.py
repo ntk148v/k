@@ -615,6 +615,13 @@ class AgentTests(unittest.TestCase):
             self.assertTrue(main.confirm_bash("rm -rf build", "yolo"))
         ask.assert_not_called()
 
+    def test_command_help_lists_descriptions_and_usage(self):
+        help_text = main.command_help()
+        self.assertIn("/help", help_text)
+        self.assertIn("/mode <review|yolo>", help_text)
+        self.assertIn("/display <formatted|stream>", help_text)
+        self.assertIn("Show this command list", help_text)
+
     def test_permission_mode_rejects_unknown_value(self):
         with self.assertRaises(ValueError):
             main.validate_permission_mode("maybe")
