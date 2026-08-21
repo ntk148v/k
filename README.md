@@ -40,6 +40,8 @@
 - **Explicit shell consent.** Every `bash` command requires interactive per-command approval; noninteractive runs reject all shell commands.
 - **One-turn Git undo.** `/undo` reverts the last completed agent turn from a clean worktree.
 - **Skills.** Load Markdown skill files from `~/.agents/skills/` to inject system instructions dynamically.
+- **Project instructions.** `AGENTS.md` in the current directory is added to every agent request (up to 16 KiB).
+- **Reviewable edits.** Exact edits return a unified diff and refuse a file that changed after K read it.
 - **Terminal UI.** Pi-inspired truecolor light/dark themes, pinned status line (showing model, tokens, git branch, cwd), colored Markdown rendering, multiline prompts.
 - **Portable.** Works with OpenAI-compatible providers that support either Responses or Chat Completions — OpenAI, OpenRouter, xAI, local LLMs, and OpenCode Zen.
 
@@ -288,6 +290,17 @@ e0ec168 feat: add session skill commands
 
 Skills are Markdown files in `~/.agents/skills/<name>/SKILL.md`. They get appended to the system prompt as additional instructions. No plugin system, no DSL — just text injected into the prompt. The directory path was iterated a few times (`~/.agent/` → `~/.agents/`).
 
+### Project Instructions
+
+Place durable repository guidance in `AGENTS.md` at the directory where you run `k`:
+
+```markdown
+Run `uv run python -m unittest -v` before reporting completion.
+Do not modify generated files under `dist/`.
+```
+
+`k` reads only that file, up to 16 KiB, for each request. It does not search parent directories.
+
 ### 8. Package, Provider, and Input Support
 
 ```
@@ -378,16 +391,18 @@ while True:
 
 That's it. The loop is: **send input → execute tool calls → feed results back → repeat until the model answers in plain text.**
 
+After K reads a text file, `edit` checks that the file has not changed before writing it. If another process changed it, K must reread the file first. This is a safety check, not a file lock.
+
 ### Tools: the 4 You Need
 
 A coding agent needs exactly 4 tools to do almost everything:
 
-| Tool    | What it does                                                  |
-| ------- | ------------------------------------------------------------- |
-| `read`  | Read file contents (text as numbered lines, images as base64) |
-| `write` | Create or overwrite files                                     |
-| `edit`  | Replace exactly one occurrence of text in a file              |
-| `bash`  | Run shell commands (git, grep, tests, ls)                     |
+| Tool    | What it does                                                       |
+| ------- | ------------------------------------------------------------------ |
+| `read`  | Read file contents (text as numbered lines, images as base64)      |
+| `write` | Create or overwrite files                                          |
+| `edit`  | Replace exactly one occurrence of text, then return a unified diff |
+| `bash`  | Run shell commands (git, grep, tests, ls)                          |
 
 **Keep tool definitions small and strict.** Set `strict: true` and `additionalProperties: false` in the JSON schema so the model doesn't hallucinate parameters.
 

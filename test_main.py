@@ -280,6 +280,45 @@ class IdentityTests(unittest.TestCase):
         self.assertIn("abc123", formatted)
 
 
+class PromptTests(unittest.TestCase):
+    def test_skill_instructions_includes_cwd_agents_md(self):
+        with tempfile.TemporaryDirectory() as directory:
+            previous = Path.cwd()
+            try:
+                os.chdir(directory)
+                Path("AGENTS.md").write_text("Run unit tests first.\n", encoding="utf-8")
+                instructions, missing = main.skill_instructions([])
+            finally:
+                os.chdir(previous)
+        self.assertEqual(missing, [])
+        self.assertIn("## Project instructions", instructions)
+        self.assertIn("Run unit tests first.", instructions)
+
+    def test_skill_instructions_omits_missing_and_oversized_agents_md(self):
+        with tempfile.TemporaryDirectory() as directory:
+            previous = Path.cwd()
+            try:
+                os.chdir(directory)
+                missing_instructions, _ = main.skill_instructions([])
+                Path("AGENTS.md").write_bytes(b"x" * (main.PROJECT_INSTRUCTIONS_MAX_BYTES + 1))
+                oversized_instructions, _ = main.skill_instructions([])
+            finally:
+                os.chdir(previous)
+        self.assertNotIn("## Project instructions", missing_instructions)
+        self.assertNotIn("## Project instructions", oversized_instructions)
+
+    def test_skill_instructions_omits_invalid_utf8_agents_md(self):
+        with tempfile.TemporaryDirectory() as directory:
+            previous = Path.cwd()
+            try:
+                os.chdir(directory)
+                Path("AGENTS.md").write_bytes(b"\xff")
+                instructions, _ = main.skill_instructions([])
+            finally:
+                os.chdir(previous)
+        self.assertNotIn("## Project instructions", instructions)
+
+
 class ReadlineTests(unittest.TestCase):
     def test_readline_is_loaded_for_interactive_history(self):
         self.assertIsNotNone(getattr(main, "readline", None))
@@ -294,9 +333,11 @@ class ToolTests(unittest.TestCase):
     def setUp(self):
         self._previous_cwd = Path.cwd()
         self._workspace = tempfile.TemporaryDirectory()
+        main.READ_STAMPS.clear()
         os.chdir(self._workspace.name)
 
     def tearDown(self):
+        main.READ_STAMPS.clear()
         os.chdir(self._previous_cwd)
         self._workspace.cleanup()
 
@@ -329,9 +370,38 @@ class ToolTests(unittest.TestCase):
     def test_edit_replaces_only_one_exact_match(self):
         Path("file.txt").write_text("before OLD after", encoding="utf-8")
         result = main.edit("file.txt", "OLD", "NEW")
-        self.assertTrue(result.startswith("Edited "))
-        self.assertTrue(result.endswith("file.txt"))
+        self.assertIn("--- a/file.txt", result)
+        self.assertIn("+++ b/file.txt", result)
+        self.assertIn("-before OLD after", result)
+        self.assertIn("+before NEW after", result)
         self.assertEqual(Path("file.txt").read_text(encoding="utf-8"), "before NEW after")
+
+    def test_edit_rejects_file_changed_since_read(self):
+        Path("file.txt").write_text("before\n", encoding="utf-8")
+        self.assertEqual(main.read("file.txt"), "1: before")
+        Path("file.txt").write_text("external\n", encoding="utf-8")
+        result = main.edit("file.txt", "external", "after")
+        self.assertEqual(result, "Error: file changed since read; re-read before editing")
+        self.assertEqual(Path("file.txt").read_text(encoding="utf-8"), "external\n")
+
+    def test_edit_allows_re_read_after_file_changes(self):
+        Path("file.txt").write_text("before\n", encoding="utf-8")
+        main.read("file.txt")
+        Path("file.txt").write_text("external\n", encoding="utf-8")
+        self.assertEqual(main.read("file.txt"), "1: external")
+        result = main.edit("file.txt", "external", "after")
+        self.assertIn("--- a/file.txt", result)
+        self.assertIn("+++ b/file.txt", result)
+        self.assertIn("-external", result)
+        self.assertIn("+after", result)
+        self.assertEqual(Path("file.txt").read_text(encoding="utf-8"), "after\n")
+
+    def test_write_is_not_blocked_by_a_stale_read(self):
+        Path("file.txt").write_text("before\n", encoding="utf-8")
+        main.read("file.txt")
+        Path("file.txt").write_text("external\n", encoding="utf-8")
+        self.assertTrue(main.write("file.txt", "replacement\n").startswith("Wrote "))
+        self.assertEqual(Path("file.txt").read_text(encoding="utf-8"), "replacement\n")
 
     def test_edit_rejects_ambiguous_text_without_writing(self):
         Path("file.txt").write_text("OLD OLD", encoding="utf-8")

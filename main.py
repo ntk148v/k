@@ -1,5 +1,6 @@
 import base64
 import argparse
+import difflib
 import json
 import re
 import readline  # noqa: F401
@@ -46,6 +47,8 @@ MAX_IMAGE_FILE_BYTES = 5_000_000
 DEFAULT_BASH_TIMEOUT = 60
 MAX_AGENT_TOOL_TURNS = 20
 MAX_HISTORY_ITEMS = 200
+PROJECT_INSTRUCTIONS_MAX_BYTES = 16 * 1024
+READ_STAMPS: dict[Path, tuple[int, int]] = {}
 
 
 def project_path(path: str) -> Path:
@@ -56,6 +59,18 @@ def project_path(path: str) -> Path:
     except ValueError:
         raise ValueError("path is outside the project") from None
     return target
+
+
+def file_stamp(path: Path) -> tuple[int, int]:
+    stat = path.stat()
+    return stat.st_mtime_ns, stat.st_size
+
+
+def display_project_path(path: Path) -> str:
+    try:
+        return str(path.relative_to(Path.cwd().resolve()))
+    except ValueError:
+        return str(path)
 
 
 def read(path: str, offset: int = 1, limit: int = 2000) -> str | list[dict[str, str]]:
@@ -77,7 +92,9 @@ def read(path: str, offset: int = 1, limit: int = 2000) -> str | list[dict[str, 
             ]
         if target.stat().st_size > MAX_TEXT_FILE_BYTES:
             return f"Error: file exceeds {MAX_TEXT_FILE_BYTES}-byte limit"
-        lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
+        text = target.read_text(encoding="utf-8", errors="replace")
+        READ_STAMPS[target] = file_stamp(target)
+        lines = text.splitlines()
         return "\n".join(
             f"{number}: {line}"
             for number, line in enumerate(
@@ -94,6 +111,7 @@ def write(path: str, content: str) -> str:
         target = project_path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
+        READ_STAMPS.pop(target, None)
         return f"Wrote {target}"
     except (OSError, ValueError) as error:
         return f"Error: cannot write {path}: {error}"
@@ -102,11 +120,24 @@ def write(path: str, content: str) -> str:
 def edit(path: str, oldText: str, newText: str) -> str:
     try:
         target = project_path(path)
+        recorded = READ_STAMPS.get(target)
+        if recorded is not None and file_stamp(target) != recorded:
+            return "Error: file changed since read; re-read before editing"
         content = target.read_text(encoding="utf-8", errors="replace")
         if content.count(oldText) != 1:
             return "Error: oldText must occur exactly once"
-        target.write_text(content.replace(oldText, newText, 1), encoding="utf-8")
-        return f"Edited {target}"
+        updated = content.replace(oldText, newText, 1)
+        target.write_text(updated, encoding="utf-8")
+        READ_STAMPS.pop(target, None)
+        label = display_project_path(target)
+        return "".join(
+            difflib.unified_diff(
+                content.splitlines(keepends=True),
+                updated.splitlines(keepends=True),
+                fromfile=f"a/{label}",
+                tofile=f"b/{label}",
+            )
+        )
     except (OSError, ValueError) as error:
         return f"Error: cannot edit {path}: {error}"
 
@@ -250,6 +281,17 @@ MAX_TOOL_OUTPUT_CHARS = 12_000
 USER_SKILLS_DIR = Path.home() / ".agents" / "skills"
 
 
+def project_instructions() -> str:
+    path = Path.cwd() / "AGENTS.md"
+    try:
+        if not path.is_file() or path.stat().st_size > PROJECT_INSTRUCTIONS_MAX_BYTES:
+            return ""
+        content = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return ""
+    return f"\n\n## Project instructions\n\n{content}"
+
+
 def available_skills() -> dict[str, Path]:
     return {path.parent.name: path for path in USER_SKILLS_DIR.rglob("SKILL.md")}
 
@@ -259,7 +301,7 @@ def skill_instructions(names: list[str]) -> tuple[str, list[str]]:
     missing = [name for name in names if name not in skills]
     active = [f"### {name}\n{skills[name].read_text(encoding='utf-8')}" for name in names if name in skills]
     suffix = "\n\n## Active skills\n\n" + "\n\n".join(active) if active else ""
-    return SYSTEM_PROMPT + suffix, missing
+    return SYSTEM_PROMPT + project_instructions() + suffix, missing
 
 
 RESET = "\033[0m"
