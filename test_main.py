@@ -342,6 +342,17 @@ class ToolTests(unittest.TestCase):
         os.chdir(self._previous_cwd)
         self._workspace.cleanup()
 
+    def test_grep_returns_numbered_matching_lines(self):
+        Path("src").mkdir()
+        Path("src/a.py").write_text("x = 1\n# TODO: test\n", encoding="utf-8")
+        self.assertEqual(main.grep("TODO", "*.py"), "src/a.py:2: # TODO: test")
+
+    def test_grep_skips_git_directory_and_rejects_invalid_regex(self):
+        Path(".git").mkdir()
+        Path(".git/ignored.py").write_text("TODO\n", encoding="utf-8")
+        self.assertEqual(main.grep("TODO", "*.py"), "No matches.")
+        self.assertTrue(main.grep("[", "*.py").startswith("Error: invalid regex:"))
+
     def test_read_respects_offset_and_limit(self):
         Path("notes.txt").write_text("first\nsecond\nthird\n", encoding="utf-8")
         self.assertEqual(main.read("notes.txt", offset=2, limit=1), "2: second")

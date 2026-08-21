@@ -1,6 +1,7 @@
 import base64
 import argparse
 import difflib
+import fnmatch
 import json
 import re
 import readline  # noqa: F401
@@ -47,6 +48,9 @@ MAX_IMAGE_FILE_BYTES = 5_000_000
 DEFAULT_BASH_TIMEOUT = 60
 MAX_AGENT_TOOL_TURNS = 20
 MAX_HISTORY_ITEMS = 200
+GREP_IGNORED_DIRS = {".git", ".venv", "node_modules", "dist", "__pycache__"}
+MAX_GREP_FILES = 2_000
+MAX_GREP_MATCHES = 2_000
 PROJECT_INSTRUCTIONS_MAX_BYTES = 16 * 1024
 READ_STAMPS: dict[Path, tuple[int, int]] = {}
 
@@ -142,6 +146,36 @@ def edit(path: str, oldText: str, newText: str) -> str:
         return f"Error: cannot edit {path}: {error}"
 
 
+def grep(pattern: str, include: str = "*") -> str:
+    try:
+        matcher = re.compile(pattern)
+    except re.error as error:
+        return f"Error: invalid regex: {error}"
+
+    matches = []
+    files = 0
+    root = Path.cwd().resolve()
+    for path in root.rglob("*"):
+        if any(part in GREP_IGNORED_DIRS for part in path.relative_to(root).parts):
+            continue
+        if not path.is_file() or not fnmatch.fnmatch(path.name, include):
+            continue
+        files += 1
+        if files > MAX_GREP_FILES:
+            return "\n".join(matches + ["[truncated: file limit reached]"])
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        relative = path.relative_to(root)
+        for number, line in enumerate(lines, 1):
+            if matcher.search(line):
+                matches.append(f"{relative}:{number}: {line}")
+                if len(matches) >= MAX_GREP_MATCHES:
+                    return "\n".join(matches + ["[truncated: match limit reached]"])
+    return "\n".join(matches) or "No matches."
+
+
 def bash(command: str, timeout: int | None = None) -> str:
     effective_timeout = DEFAULT_BASH_TIMEOUT if timeout is None else timeout
     if not isinstance(effective_timeout, int) or not 1 <= effective_timeout <= DEFAULT_BASH_TIMEOUT:
@@ -234,6 +268,21 @@ TOOLS = [
     },
     {
         "type": "function",
+        "name": "grep",
+        "description": "Search project text files with a regular expression. Skips generated and dependency directories.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string", "description": "Regular expression to search for"},
+                "include": {"type": "string", "description": "Filename glob, such as *.py", "default": "*"},
+            },
+            "required": ["pattern"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+    {
+        "type": "function",
         "name": "bash",
         "description": "Execute a bash command in the current working directory. Returns combined stdout and stderr. On non-zero exit, output is prefixed with [exit N].",
         "parameters": {
@@ -273,6 +322,7 @@ TOOL_HANDLERS = {
     "read": read,
     "write": write,
     "edit": edit,
+    "grep": grep,
     "bash": bash,
 }
 
