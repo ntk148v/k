@@ -796,14 +796,16 @@ def run_agent(
     model: str = MODEL,
     confirm_bash: object = None,
     on_activity: object = None,
+    quiet: bool = False,
 ) -> tuple[str, int, int | None, list[object]]:
     instructions, missing = skill_instructions(skills or [])
     for name in missing:
-        render("info", f"Warning: skill '{name}' not found, skipping")
+        if not quiet:
+            render("info", f"Warning: skill '{name}' not found, skipping")
     if API_MODE == "responses":
-        return run_responses_agent(task, client, instructions, history, session_id, model=model, confirm_bash=confirm_bash, on_activity=on_activity)
+        return run_responses_agent(task, client, instructions, history, session_id, model=model, confirm_bash=confirm_bash, on_activity=on_activity, quiet=quiet)
     if API_MODE == "chat-completions":
-        return run_chat_agent(task, client, instructions, history, session_id, model=model, confirm_bash=confirm_bash, on_activity=on_activity)
+        return run_chat_agent(task, client, instructions, history, session_id, model=model, confirm_bash=confirm_bash, on_activity=on_activity, quiet=quiet)
     raise RuntimeError("K_API_MODE must be 'responses' or 'chat-completions'")
 
 
@@ -832,6 +834,7 @@ def run_responses_agent(
     model: str = MODEL,
     confirm_bash: object = None,
     on_activity: object = None,
+    quiet: bool = False,
 ) -> tuple[str, int, int | None, list[object]]:
     history = list(history or [])
     history.append({"role": "user", "content": task})
@@ -864,8 +867,9 @@ def run_responses_agent(
         history.extend(
             dispatch_tool(call.name, call.arguments, call.call_id, session_id, confirm_bash=confirm_bash, on_activity=on_activity) for call in calls
         )
-        for call in calls:
-            render("tool", f"{call.name}({call.arguments})")
+        if not quiet:
+            for call in calls:
+                render("tool", f"{call.name}({call.arguments})")
 
 
 def run_chat_agent(
@@ -878,6 +882,7 @@ def run_chat_agent(
     model: str = MODEL,
     confirm_bash: object = None,
     on_activity: object = None,
+    quiet: bool = False,
 ) -> tuple[str, int, int | None, list[object]]:
     saved_history = list(history or [])
     history = []
@@ -940,7 +945,8 @@ def run_chat_agent(
                 call.function.name, call.function.arguments, call.id, session_id, confirm_bash=confirm_bash, on_activity=on_activity
             )
             history.append({"role": "tool", "tool_call_id": call.id, "content": result["output"]})
-            render("tool", f"{call.function.name}({call.function.arguments})")
+            if not quiet:
+                render("tool", f"{call.function.name}({call.function.arguments})")
 
 
 def configure_multiline_input() -> None:
@@ -951,8 +957,9 @@ def configure_multiline_input() -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(prog="k")
     parser.add_argument("--resume", metavar="ID")
+    parser.add_argument("-p", "--print", dest="print_prompt", nargs="?", const="")
     parser.add_argument("--theme", choices=PALETTES, default=os.getenv("K_THEME", "light"))
-    args, _ = parser.parse_known_args()
+    args, extra = parser.parse_known_args()
     set_theme(args.theme)
     session = {"id": new_session_id(), "history": [], "transcript": [], "skills": [], "api_mode": API_MODE, "model": MODEL, "title": ""}
     if args.resume:
@@ -964,6 +971,14 @@ def main() -> None:
             render("output", f"Error: {error}")
     ensure_session_defaults(session)
     client = OpenAI()
+
+    if args.print_prompt is not None:
+        prompt = args.print_prompt or " ".join(extra) or (sys.stdin.read() if not sys.stdin.isatty() else "")
+        if not prompt.strip():
+            parser.error("-p requires a prompt or piped stdin")
+        answer, _, _, _ = run_agent(prompt, client, session["history"], session["id"], session.get("skills", []), model=session["model"], quiet=True)
+        print(answer)
+        return
 
     def confirm_bash(command: str) -> bool:
         if not sys.stdin.isatty() or not sys.stdout.isatty():

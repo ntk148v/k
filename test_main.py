@@ -2,6 +2,7 @@ import io
 import json
 import os
 import stat
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -504,6 +505,21 @@ class ToolTests(unittest.TestCase):
 
 
 class AgentTests(unittest.TestCase):
+    def test_main_print_mode_writes_only_final_answer_to_stdout(self):
+        with (
+            patch.object(sys, "argv", ["k", "-p", "describe main"]),
+            patch.object(main, "OpenAI"),
+            patch.object(main, "run_agent", return_value=("answer", 1, 1, [])),
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+            patch("sys.stderr", new_callable=io.StringIO),
+        ):
+            main.main()
+        self.assertEqual(stdout.getvalue(), "answer\n")
+
+    def test_main_print_mode_rejects_bash_without_a_tty(self):
+        result = main.dispatch_tool("bash", '{"command":"echo no"}', "call")
+        self.assertEqual(result["output"], "Error: bash command rejected by user")
+
     def setUp(self):
         self.api_mode = main.API_MODE
         main.API_MODE = "responses"
