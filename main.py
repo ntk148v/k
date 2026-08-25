@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import tomllib
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -175,7 +176,8 @@ def grep(pattern: str, include: str = "*") -> str:
     files = 0
     root = Path.cwd().resolve()
     for path in root.rglob("*"):
-        if any(part in GREP_IGNORED_DIRS for part in path.relative_to(root).parts):
+        relative = path.relative_to(root)
+        if any(part in GREP_IGNORED_DIRS for part in relative.parts):
             continue
         if not path.is_file() or not fnmatch.fnmatch(path.name, include):
             continue
@@ -186,7 +188,6 @@ def grep(pattern: str, include: str = "*") -> str:
             lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError:
             continue
-        relative = path.relative_to(root)
         for number, line in enumerate(lines, 1):
             if matcher.search(line):
                 matches.append(f"{relative}:{number}: {line}")
@@ -388,10 +389,11 @@ def project_instructions() -> str:
         except (OSError, UnicodeError):
             continue
         block = f"\n## {path}\n\n{content}"
-        if total + len(block.encode()) > PROJECT_INSTRUCTIONS_TOTAL_BYTES:
+        size = len(block.encode())
+        if total + size > PROJECT_INSTRUCTIONS_TOTAL_BYTES:
             break
         blocks.append(block)
-        total += len(block.encode())
+        total += size
     return "\n\n## Project instructions\n" + "".join(blocks) if blocks else ""
 
 
@@ -587,6 +589,14 @@ def load_session(session_id: str) -> dict:
     return ensure_session_defaults(session)
 
 
+def load_resume_session(session_id: str) -> dict:
+    """Load a session and validate that it can be resumed under the current API mode."""
+    session = load_session(session_id)
+    if session.get("api_mode", "responses") != API_MODE:
+        raise ValueError("cannot resume a session created with a different K_API_MODE")
+    return session
+
+
 def write_private_text(path: Path, content: str) -> None:
     fd, temp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
@@ -679,7 +689,7 @@ Guidelines:
 - Show file paths clearly when working with files"""
 
 
-def dispatch_tool(name: str, arguments: str, call_id: str, session_id: str | None = None, *, confirm_bash: object = None, on_activity: object = None) -> dict:
+def dispatch_tool(name: str, arguments: str, call_id: str, session_id: str | None = None, *, confirm_bash: Callable[[str], bool] | None = None, on_activity: Callable[[str], None] | None = None) -> dict:
     try:
         args = json.loads(arguments)
     except json.JSONDecodeError as e:
@@ -823,18 +833,8 @@ def apply_undo(record: dict | None) -> str:
 
 
 def git_branch() -> str | None:
-    try:
-        result = subprocess.run(
-            ["git", "branch", "--show-current"],
-            cwd=Path.cwd(),
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-    except OSError:
-        return None
-    return result.stdout.strip() or None
+    branch = _git(["branch", "--show-current"])
+    return branch.strip() or None if branch else None
 
 
 def status_line(total_tokens: int | str, context_tokens: int | None, model: str = MODEL, activity: str = "") -> str:
@@ -926,8 +926,9 @@ def restore_terminal() -> None:
 
 
 def handle_skill_command(text: str, session: dict) -> str | None:
+    skills = available_skills()
     if text == "/skills":
-        names = ", ".join(available_skills()) or "(none)"
+        names = ", ".join(skills) or "(none)"
         return f"Available skills: {names}"
     if not text.startswith("/skill "):
         return None
@@ -937,7 +938,7 @@ def handle_skill_command(text: str, session: dict) -> str | None:
         return "Cleared skills"
     if not name or "/" in name or "\\" in name:
         return "Invalid skill name"
-    if name not in available_skills():
+    if name not in skills:
         return f"Unknown skill: {name}"
     active = session.setdefault("skills", [])
     if name in active:
@@ -1000,12 +1001,12 @@ def run_agent(
     skills: list[str] | None = None,
     *,
     model: str = MODEL,
-    confirm_bash: object = None,
-    on_activity: object = None,
+    confirm_bash: Callable[[str], bool] | None = None,
+    on_activity: Callable[[str], None] | None = None,
     quiet: bool = False,
     api_mode: str | None = None,
     stream: bool = False,
-    on_text: object = None,
+    on_text: Callable[[str], None] | None = None,
 ) -> tuple[str, int, int | None, list[object]]:
     instructions, missing = skill_instructions(skills or [])
     selected_api_mode = api_mode or API_MODE
@@ -1039,7 +1040,7 @@ def _trim_history(history: list) -> list:
 
 
 def _stream_responses_turn(
-    client: OpenAI, model: str, instructions: str, history: list[object], on_text: object = None
+    client: OpenAI, model: str, instructions: str, history: list[object], on_text: Callable[[str], None] | None = None
 ) -> tuple[str, list[dict[str, str]]]:
     assembler = StreamAssembler()
     events = client.responses.create(model=model, instructions=instructions, input=list(_trim_history(history)), tools=TOOLS, stream=True)
@@ -1062,7 +1063,7 @@ def _stream_responses_turn(
 
 
 def _stream_chat_turn(
-    client: OpenAI, model: str, instructions: str, history: list[object], on_text: object = None
+    client: OpenAI, model: str, instructions: str, history: list[object], on_text: Callable[[str], None] | None = None
 ) -> tuple[str, list[dict[str, str]]]:
     assembler = StreamAssembler()
     stream_response = client.chat.completions.create(
@@ -1094,11 +1095,11 @@ def run_responses_agent(
     session_id: str | None,
     *,
     model: str = MODEL,
-    confirm_bash: object = None,
-    on_activity: object = None,
+    confirm_bash: Callable[[str], bool] | None = None,
+    on_activity: Callable[[str], None] | None = None,
     quiet: bool = False,
     stream: bool = False,
-    on_text: object = None,
+    on_text: Callable[[str], None] | None = None,
 ) -> tuple[str, int, int | None, list[object]]:
     history = list(history or [])
     history.append({"role": "user", "content": task})
@@ -1155,11 +1156,11 @@ def run_chat_agent(
     session_id: str | None,
     *,
     model: str = MODEL,
-    confirm_bash: object = None,
-    on_activity: object = None,
+    confirm_bash: Callable[[str], bool] | None = None,
+    on_activity: Callable[[str], None] | None = None,
     quiet: bool = False,
     stream: bool = False,
-    on_text: object = None,
+    on_text: Callable[[str], None] | None = None,
 ) -> tuple[str, int, int | None, list[object]]:
     saved_history = list(history or [])
     history = []
@@ -1257,12 +1258,10 @@ def main() -> None:
     parser.add_argument("--display", choices=("formatted", "stream"), help="response display mode")
     args, extra = parser.parse_known_args()
     set_theme(args.theme)
-    session = {"id": new_session_id(), "history": [], "transcript": [], "skills": [], "api_mode": API_MODE, "model": MODEL, "title": ""}
+    session = {"id": new_session_id(), "history": [], "transcript": []}
     if args.resume:
         try:
-            session = load_session(args.resume)
-            if session.get("api_mode", "responses") != API_MODE:
-                raise ValueError("cannot resume a session created with a different K_API_MODE")
+            session = load_resume_session(args.resume)
         except ValueError as error:
             render("output", f"Error: {error}")
     ensure_session_defaults(session)
@@ -1314,6 +1313,19 @@ def main() -> None:
     def on_activity(activity: str) -> None:
         render_pinned_status(status_line("?", None, session["model"], activity))
 
+    def apply_setting(task: str, prefix: str, key: str, label: str, validate, usage: str) -> None:
+        value = task.removeprefix(prefix).strip()
+        if not value:
+            render("info", f"{label}: {session[key]}")
+            return
+        try:
+            session[key] = validate(value)
+        except ValueError:
+            render("output", usage)
+        else:
+            save_session(session)
+            render("info", f"{label} set to {value}")
+
     try:
         if sys.stdout.isatty():
             sys.stdout.write("\033[2J\033[H")
@@ -1346,9 +1358,7 @@ def main() -> None:
                         render("info", format_session_list(list_sessions()))
                     elif len(parts) == 2:
                         try:
-                            resumed = load_session(parts[1])
-                            if resumed.get("api_mode", "responses") != API_MODE:
-                                raise ValueError("cannot resume a session created with a different K_API_MODE")
+                            resumed = load_resume_session(parts[1])
                         except ValueError as error:
                             render("output", f"Error: {error}")
                         else:
@@ -1361,30 +1371,10 @@ def main() -> None:
                         render("output", "Usage: /resume [session-id]")
                     continue
                 if command == "/mode":
-                    mode = task.removeprefix("/mode").strip()
-                    if not mode:
-                        render("info", f"Permission mode: {session['permission_mode']}")
-                    else:
-                        try:
-                            session["permission_mode"] = validate_permission_mode(mode)
-                        except ValueError:
-                            render("output", "Usage: /mode <review|yolo>")
-                        else:
-                            save_session(session)
-                            render("info", f"Permission mode set to {mode}")
+                    apply_setting(task, "/mode", "permission_mode", "Permission mode", validate_permission_mode, "Usage: /mode <review|yolo>")
                     continue
                 if command == "/display":
-                    display = task.removeprefix("/display").strip()
-                    if not display:
-                        render("info", f"Display mode: {session['display_mode']}")
-                    else:
-                        try:
-                            session["display_mode"] = validate_display_mode(display)
-                        except ValueError:
-                            render("output", "Usage: /display <formatted|stream>")
-                        else:
-                            save_session(session)
-                            render("info", f"Display mode set to {display}")
+                    apply_setting(task, "/display", "display_mode", "Display mode", validate_display_mode, "Usage: /display <formatted|stream>")
                     continue
                 if command == "/model":
                     model = task.removeprefix("/model").strip()
