@@ -4,6 +4,7 @@ import os
 import stat
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -523,16 +524,15 @@ class ToolTests(unittest.TestCase):
 
     def test_bash_terminates_process_on_keyboard_interrupt(self):
         process = Mock()
-        process.communicate.side_effect = KeyboardInterrupt
-        with patch.object(main.subprocess, "Popen", return_value=process):
+        process.communicate.side_effect = [KeyboardInterrupt, ("", None)]
+        with patch.object(main.subprocess, "Popen", return_value=process), patch.object(main.os, "killpg") as killpg:
             self.assertEqual(main.bash("sleep 60"), "Error: command interrupted")
-        process.terminate.assert_called_once()
-        process.wait.assert_called()
+        killpg.assert_called_once_with(process.pid, main.signal.SIGTERM)
 
     def test_bash_timeout_returns_error_message(self):
         process = Mock()
         process.communicate.side_effect = [main.subprocess.TimeoutExpired("cmd", 1), ("", None)]
-        with patch.object(main.subprocess, "Popen", return_value=process):
+        with patch.object(main.subprocess, "Popen", return_value=process), patch.object(main.os, "killpg"):
             result = main.bash("sleep 60", timeout=1)
         self.assertTrue(result.startswith("Error: command timed out"))
 
@@ -1445,3 +1445,209 @@ class AgentTests(unittest.TestCase):
             session = {"id": "abc123", "history": [], "transcript": [], "skills": ["coding"]}
             main.save_session(session)
             self.assertEqual(main.load_session("abc123")["skills"], ["coding"])
+
+
+class CodeReviewRegressionTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name).resolve()
+        previous = Path.cwd()
+        self.addCleanup(os.chdir, previous)
+        os.chdir(self.root)
+
+    def git(self, *args: str) -> None:
+        main.subprocess.run(["git", *args], cwd=self.root, check=True, stdout=main.subprocess.DEVNULL)
+
+    def init_repo(self, files: dict[str, bytes]) -> None:
+        self.git("init", "-q")
+        self.git("config", "user.email", "k@example.test")
+        self.git("config", "user.name", "k")
+        self.git("config", "core.autocrlf", "false")
+        for name, content in files.items():
+            path = self.root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+        self.git("add", ".")
+        self.git("commit", "-qm", "init")
+
+    def test_undo_from_subdirectory_covers_whole_repo(self):
+        self.init_repo({"new.txt": b"keep\n", "other.txt": b"before\n", "sub/tracked.txt": b"x\n"})
+        os.chdir(self.root / "sub")
+        checkpoint = main.begin_undo_checkpoint()
+        (self.root / "sub/new.txt").write_text("created\n", encoding="utf-8")
+        (self.root / "top.txt").write_text("created\n", encoding="utf-8")
+        (self.root / "other.txt").write_text("after\n", encoding="utf-8")
+        record = main.finish_undo_checkpoint(checkpoint)
+        self.assertEqual(main.apply_undo(record), "Undo complete.")
+        self.assertEqual((self.root / "new.txt").read_bytes(), b"keep\n")
+        self.assertEqual((self.root / "other.txt").read_bytes(), b"before\n")
+        self.assertFalse((self.root / "sub/new.txt").exists())
+        self.assertFalse((self.root / "top.txt").exists())
+
+    def test_undo_handles_crlf_and_non_utf8_through_session_json(self):
+        self.init_repo({"crlf.txt": b"a\r\nb\r\n", "latin.txt": b"caf\xe9\n"})
+        checkpoint = main.begin_undo_checkpoint()
+        (self.root / "crlf.txt").write_bytes(b"a\r\nc\r\n")
+        (self.root / "latin.txt").write_bytes(b"caf\xe9 au lait\n")
+        record = json.loads(json.dumps(main.finish_undo_checkpoint(checkpoint)))
+        self.assertEqual(main.apply_undo(record), "Undo complete.")
+        self.assertEqual((self.root / "crlf.txt").read_bytes(), b"a\r\nb\r\n")
+        self.assertEqual((self.root / "latin.txt").read_bytes(), b"caf\xe9\n")
+
+    def test_edit_preserves_other_bytes(self):
+        Path("latin.txt").write_bytes(b"caf\xe9\nold\n")
+        diff = main.edit("latin.txt", "old", "new")
+        self.assertEqual(Path("latin.txt").read_bytes(), b"caf\xe9\nnew\n")
+        diff.encode("utf-8")  # The diff must be sendable to the provider.
+        Path("crlf.txt").write_bytes(b"a\r\nold\r\nz\r\n")
+        main.edit("crlf.txt", "a\nold", "a\nnew\nmore")
+        self.assertEqual(Path("crlf.txt").read_bytes(), b"a\r\nnew\r\nmore\r\nz\r\n")
+
+    def test_grep_skips_symlink_escape_and_large_files(self):
+        with tempfile.TemporaryDirectory() as outside:
+            secret = Path(outside) / "secret"
+            secret.write_text("TOKEN=abc\n", encoding="utf-8")
+            Path("link").symlink_to(secret)
+            Path("big.txt").write_text("TOKEN\n" * (main.MAX_TEXT_FILE_BYTES // 5), encoding="utf-8")
+            Path("ok.txt").write_text("TOKEN=ok\n", encoding="utf-8")
+            self.assertEqual(main.grep("TOKEN"), "ok.txt:1: TOKEN=ok")
+
+    def test_trim_history_drops_leading_call_with_its_output(self):
+        call = {"type": "function_call", "call_id": "c", "name": "read", "arguments": "{}"}
+        output = {"type": "function_call_output", "call_id": "c", "output": "x"}
+        user = {"role": "user", "content": "hi"}
+        self.assertEqual(main._trim_history([call, output, *[user] * (main.MAX_HISTORY_ITEMS - 2)]), [user] * (main.MAX_HISTORY_ITEMS - 2))
+        self.assertEqual(main._trim_history([output, user]), [user])
+
+    def test_stream_chat_keeps_arguments_and_ignores_empty_chunks(self):
+        def tool_chunk(arguments, call_id="c1", name="read"):
+            call = SimpleNamespace(index=0, id=call_id, function=SimpleNamespace(name=name, arguments=arguments))
+            return SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=None, tool_calls=[call]))])
+
+        chunks = [SimpleNamespace(choices=[]), tool_chunk('{"pa'), tool_chunk('th":"x"}')]
+        client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=Mock(return_value=chunks))))
+        _, calls = main._stream_chat_turn(client, "m", "i", [])
+        self.assertEqual(calls, [{"id": "c1", "name": "read", "arguments": '{"path":"x"}'}])
+
+    def test_stream_chat_empty_call_id_matches_tool_result(self):
+        call = SimpleNamespace(index=0, id="", function=SimpleNamespace(name="grep", arguments='{"pattern":"zzz"}'))
+        first = [SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=None, tool_calls=[call]))])]
+        second = [SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content="done", tool_calls=None))])]
+        client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=Mock(side_effect=[first, second]))))
+        _, _, _, history = main.run_agent("x", client, api_mode="chat-completions", stream=True)
+        call_id = history[1]["tool_calls"][0]["id"]
+        self.assertTrue(call_id)
+        self.assertEqual(history[2]["tool_call_id"], call_id)
+
+    def test_bash_timeout_stops_children_and_keeps_partial_output(self):
+        started = time.monotonic()
+        result = main.bash("echo partial; sleep 20; echo done", timeout=1)
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertIn("timed out", result)
+        self.assertIn("partial", result)
+
+    def test_tool_schemas_follow_strict_rules(self):
+        for tool in main.TOOLS:
+            parameters = tool["parameters"]
+            self.assertEqual(sorted(parameters["required"]), sorted(parameters["properties"]), tool["name"])
+            for schema in parameters["properties"].values():
+                self.assertNotIn("default", schema)
+
+    def test_dispatch_treats_null_arguments_as_defaults(self):
+        Path("a.txt").write_text("one\n", encoding="utf-8")
+        result = main.dispatch_tool("read", '{"path":"a.txt","offset":null,"limit":null}', "c")
+        self.assertEqual(result["output"], "1: one")
+
+    def test_read_accepts_jpeg(self):
+        Path("a.jpeg").write_bytes(b"x")
+        self.assertEqual(main.read("a.jpeg")[0]["type"], "input_image")
+
+    def test_chat_images_follow_all_tool_messages(self):
+        history = []
+        main._append_chat_results(
+            history,
+            [
+                {"call_id": "a", "output": [{"type": "input_image", "image_url": "data:img"}]},
+                {"call_id": "b", "output": "text"},
+            ],
+        )
+        self.assertEqual([item["role"] for item in history], ["tool", "tool", "user"])
+        self.assertEqual(history[0]["content"], "Image attached in the next message.")
+        self.assertEqual(history[2]["content"], [{"type": "image_url", "image_url": {"url": "data:img"}}])
+
+    def test_compact_chat_sends_no_tools_field(self):
+        response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="summary"))])
+        create = Mock(return_value=response)
+        client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+        main.compact_session({"history": [], "api_mode": "chat-completions", "model": "m"}, client)
+        self.assertNotIn("tools", create.call_args.kwargs)
+
+    def test_system_prompt_lists_grep(self):
+        self.assertIn("- grep:", main.SYSTEM_PROMPT)
+
+    def run_main(self, argv, inputs, *, config=None, saved=None, env=None, agent_result=("ok", 1, 1, [])):
+        with (
+            patch("sys.argv", ["k", *argv]),
+            patch("builtins.input", side_effect=inputs),
+            patch.dict(os.environ, env or {}),
+            patch.object(main.Path, "home", return_value=self.root),
+            patch.object(main, "load_config", return_value=config or {}),
+            patch.object(main, "load_session", side_effect=lambda session_id: saved[session_id]),
+            patch.object(main, "OpenAI") as client,
+            patch.object(main, "run_agent", return_value=agent_result) as agent,
+            patch.object(main, "begin_undo_checkpoint", return_value=None),
+            patch.object(main, "render_pinned_status", return_value=True),
+            patch.object(main, "restore_terminal"),
+            patch.object(main, "save_session"),
+            patch.object(main, "render") as render,
+            patch("builtins.print"),
+        ):
+            main.main()
+        return SimpleNamespace(client=client, agent=agent, messages=[call.args[1] for call in render.call_args_list])
+
+    def session(self, **fields):
+        return main.ensure_session_defaults({"id": "saved", "history": [], "transcript": [], **fields})
+
+    def test_print_mode_needs_explicit_yolo_flag(self):
+        config = {"defaults": {"permission_mode": "yolo"}}
+        self.assertIsNone(self.run_main(["-p", "task"], [], config=config).agent.call_args.kwargs["confirm_bash"])
+        self.assertIsNotNone(self.run_main(["-p", "task", "--mode", "yolo"], []).agent.call_args.kwargs["confirm_bash"])
+
+    def test_interactive_config_yolo_without_tty_rejects_bash(self):
+        result = self.run_main([], ["hello", ""], config={"defaults": {"permission_mode": "yolo"}})
+        with patch("sys.stdin", new_callable=io.StringIO):
+            self.assertFalse(result.agent.call_args.kwargs["confirm_bash"]("rm -rf build"))
+
+    def test_resume_command_keeps_current_permission_mode(self):
+        saved = {"saved": self.session(permission_mode="yolo", api_mode="responses")}
+        with patch.dict(os.environ, {"K_API_MODE": "responses"}):
+            self.run_main([], ["/resume saved", ""], saved=saved)
+        self.assertEqual(saved["saved"]["permission_mode"], "review")
+
+    def test_resume_keeps_saved_model(self):
+        saved = {"saved": self.session(model="saved-model", api_mode="responses")}
+        result = self.run_main(["--resume", "saved", "-p", "task"], [], saved=saved, env={"OPENAI_MODEL_NAME": "env-model", "K_API_MODE": "responses"})
+        self.assertEqual(result.agent.call_args.kwargs["model"], "saved-model")
+
+    def test_resume_uses_api_mode_from_config(self):
+        saved = {"saved": self.session(api_mode="chat-completions")}
+        env = {key: value for key, value in os.environ.items() if key != "K_API_MODE"}
+        with patch.dict(os.environ, env, clear=True):
+            result = self.run_main(["--resume", "saved", "-p", "task"], [], saved=saved, config={"defaults": {"api_mode": "chat-completions"}})
+        self.assertEqual(result.agent.call_args.kwargs["api_mode"], "chat-completions")
+        with self.assertRaisesRegex(ValueError, "cannot resume"), patch.object(main, "load_session", return_value=saved["saved"]):
+            main.load_resume_session("saved", "responses")
+
+    def test_preset_refuses_api_mode_change_with_history(self):
+        saved = {"saved": self.session(api_mode="responses", history=[{"role": "user", "content": "hi"}], model="old")}
+        config = {"presets": {"fast": {"model": "new", "api_mode": "chat-completions"}}}
+        result = self.run_main(["--resume", "saved"], ["/preset fast", ""], saved=saved, config=config, env={"K_API_MODE": "responses"})
+        self.assertEqual(saved["saved"]["api_mode"], "responses")
+        self.assertEqual(saved["saved"]["model"], "old")
+        self.assertTrue(any("different API mode" in message for message in result.messages))
+
+    def test_environment_base_url_overrides_config(self):
+        config = {"defaults": {"base_url": "https://config.example/v1"}}
+        result = self.run_main([], [""], config=config, env={"OPENAI_BASE_URL": "https://env.example/v1"})
+        self.assertEqual(result.client.call_args.kwargs["base_url"], "https://env.example/v1")

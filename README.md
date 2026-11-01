@@ -33,10 +33,10 @@
 - **Headless mode.** `k -p "task"` prints a final answer for scripts and CI.
 - **Streaming.** Responses and tool arguments arrive incrementally, behind `formatted`/`stream` display modes.
 - **Sessions.** Auto-saved to `~/.k/sessions/<id>.json` with title, model, and cwd metadata; `/resume` lists and switches sessions, `/model` persists a session's model, and `/new`, `/fork`, `/compact` keep experiments reversible.
-- **Provider presets.** `[defaults]` and `[presets.*]` sections in `~/.k/config.toml`; `/preset <name>` switches model and API mode mid-session.
+- **Provider presets.** `[defaults]` and `[presets.*]` sections in `~/.k/config.toml`; `/preset <name>` switches the model mid-session, and the API mode only while the history is empty.
 - **Context-mode compaction.** Large tool outputs are truncated to a head/tail preview; the full text is saved to disk alongside the session.
 - **Permission modes.** `review` (default) approves every `bash` command interactively; `yolo` runs without prompts. Noninteractive runs reject shell commands unless `--mode yolo` is explicit.
-- **Project-bound file tools.** `read`, `write`, and `edit` only touch files inside the current working directory, including symlink escapes; edits return a unified diff and refuse files changed since K read them.
+- **Project-bound file tools.** `read`, `write`, `edit`, and `grep` only touch files inside the current working directory, including symlink escapes; edits return a unified diff and refuse files changed since K read them.
 - **One-turn Git undo.** `/undo` reverts the last completed agent turn from a clean worktree.
 - **Skills & project instructions.** Markdown skills from `~/.agents/skills/`; layered `AGENTS.md` instructions from `~/.k/AGENTS.md` down through the repo root to the current directory.
 - **Terminal UI.** Pi-inspired truecolor light/dark themes, pinned status line (model, tokens, git branch, cwd), colored Markdown rendering, multiline prompts.
@@ -118,7 +118,7 @@ uv run python main.py --resume <session-id>
 
 The defaults are `review` permission mode (each shell command is shown and requires approval) and `formatted` display. While the agent works, the pinned status temporarily shows `thinking` and the active tool name.
 
-**Safety:** The `read`, `write`, and `edit` tools resolve every path against the current working directory and reject anything outside it, including symlink escapes. `bash` is not sandboxed. In `review` mode, each shell command displays the exact command and requires approval; `yolo` mode skips approval. Noninteractive runs reject shell commands unless `--mode yolo` is explicit. K is not a container or OS sandbox — run it only in environments you trust.
+**Safety:** The `read`, `write`, `edit`, and `grep` tools resolve every path against the current working directory and reject anything outside it, including symlink escapes. `bash` is not sandboxed. In `review` mode, each shell command displays the exact command and requires approval; `yolo` mode skips approval. Noninteractive runs reject shell commands unless `--mode yolo` is explicit. K is not a container or OS sandbox — run it only in environments you trust.
 
 **Undo:** `/undo` works once, only after a task that began with a clean Git worktree. It reverses the turn's tracked changes (staged changes included), deletes files the turn created, preserves everything that existed before, and declines if the worktree changed since the turn.
 
@@ -175,7 +175,7 @@ The full output is always saved to an artifact file next to the session, so noth
 
 | Boundary                 | Limit                             |
 | ------------------------ | --------------------------------- |
-| Text file read           | 1 MB (`MAX_TEXT_FILE_BYTES`)      |
+| Text file read or grep   | 1 MB (`MAX_TEXT_FILE_BYTES`)      |
 | Image read               | 5 MB (`MAX_IMAGE_FILE_BYTES`)     |
 | Shell command duration   | 60 s max (`DEFAULT_BASH_TIMEOUT`) |
 | Tool turns per prompt    | 20 (`MAX_AGENT_TOOL_TURNS`)       |
@@ -264,7 +264,7 @@ A coding agent needs exactly 4 tools to do almost everything:
 
 `k` itself ships a fifth tool, `grep`: a bounded regex search over the project that skips `.git`, `.venv`, `node_modules`, `dist`, and `__pycache__`.
 
-**Keep tool definitions small and strict.** Set `strict: true` and `additionalProperties: false` in the JSON schema so the model doesn't hallucinate parameters.
+**Keep tool definitions small and strict.** Set `strict: true` and `additionalProperties: false` in the JSON schema so the model doesn't hallucinate parameters. Strict mode requires every property in `required`, so optional parameters are nullable and have no `default`.
 
 ```python
 {
@@ -275,10 +275,10 @@ A coding agent needs exactly 4 tools to do almost everything:
         "type": "object",
         "properties": {
             "path": {"type": "string", "description": "File path to read"},
-            "offset": {"type": "integer", "description": "Start line (1-indexed)", "default": 1},
-            "limit": {"type": "integer", "description": "Max lines to read", "default": 2000},
+            "offset": {"type": ["integer", "null"], "description": "Start line (1-indexed). Null means 1."},
+            "limit": {"type": ["integer", "null"], "description": "Max lines to read. Null means 2000."},
         },
-        "required": ["path"],
+        "required": ["path", "offset", "limit"],
         "additionalProperties": False,
     },
     "strict": True,

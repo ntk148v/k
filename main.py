@@ -8,6 +8,7 @@ import re
 import readline
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -41,6 +42,7 @@ MULTILINE_INPUT_BINDING = r'"\C-j": "\C-v\C-j"'
 
 IMAGE_TYPES = {
     ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
     ".png": "image/png",
     ".gif": "image/gif",
     ".webp": "image/webp",
@@ -147,14 +149,19 @@ def edit(path: str, oldText: str, newText: str) -> str:
         recorded = READ_STAMPS.get(target)
         if recorded is not None and file_stamp(target) != recorded:
             return "Error: file changed since read; re-read before editing"
-        content = target.read_text(encoding="utf-8", errors="replace")
+        # surrogateescape keeps invalid UTF-8 and original line endings byte for byte.
+        content = target.read_bytes().decode("utf-8", "surrogateescape")
+        # read() hides CR from the model, so match its LF text to a CRLF file.
+        if "\r\n" in content and "\r" not in oldText + newText:
+            oldText = oldText.replace("\n", "\r\n")
+            newText = newText.replace("\n", "\r\n")
         if content.count(oldText) != 1:
             return "Error: oldText must occur exactly once"
         updated = content.replace(oldText, newText, 1)
-        target.write_text(updated, encoding="utf-8")
+        target.write_bytes(updated.encode("utf-8", "surrogateescape"))
         READ_STAMPS.pop(target, None)
         label = display_project_path(target)
-        return "".join(
+        diff = "".join(
             difflib.unified_diff(
                 content.splitlines(keepends=True),
                 updated.splitlines(keepends=True),
@@ -162,6 +169,8 @@ def edit(path: str, oldText: str, newText: str) -> str:
                 tofile=f"b/{label}",
             )
         )
+        # Lone surrogates cannot be sent to the provider as JSON.
+        return diff.encode("utf-8", "replace").decode("utf-8")
     except (OSError, ValueError) as error:
         return f"Error: cannot edit {path}: {error}"
 
@@ -185,8 +194,11 @@ def grep(pattern: str, include: str = "*") -> str:
         if files > MAX_GREP_FILES:
             return "\n".join(matches + ["[truncated: file limit reached]"])
         try:
+            project_path(str(path))
+            if path.stat().st_size > MAX_TEXT_FILE_BYTES:
+                continue
             lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-        except OSError:
+        except (OSError, ValueError):
             continue
         for number, line in enumerate(lines, 1):
             if matcher.search(line):
@@ -194,6 +206,20 @@ def grep(pattern: str, include: str = "*") -> str:
                 if len(matches) >= MAX_GREP_MATCHES:
                     return "\n".join(matches + ["[truncated: match limit reached]"])
     return "\n".join(matches) or "No matches."
+
+
+def stop_process_group(process: subprocess.Popen) -> str:
+    """Stop the shell and its children, because children keep stdout open."""
+    for stop_signal in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(process.pid, stop_signal)
+        except OSError:
+            pass
+        try:
+            return process.communicate(timeout=5)[0]
+        except subprocess.TimeoutExpired:
+            continue
+    return ""  # A child left the process group and still holds stdout.
 
 
 def bash(command: str, timeout: int | None = None) -> str:
@@ -209,23 +235,17 @@ def bash(command: str, timeout: int | None = None) -> str:
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            start_new_session=(os.name == "posix"),
+            start_new_session=True,
             encoding="utf-8",
             errors="replace",
         )
         try:
             stdout, _ = process.communicate(timeout=effective_timeout)
         except subprocess.TimeoutExpired:
-            process.terminate()
-            try:
-                stdout, _ = process.communicate(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                stdout, _ = process.communicate()
-            return f"Error: command timed out after {effective_timeout}s"
+            output = stop_process_group(process)
+            return f"Error: command timed out after {effective_timeout}s\n{output}".rstrip()
         except KeyboardInterrupt:
-            process.terminate()
-            process.wait()
+            stop_process_group(process)
             return "Error: command interrupted"
         if process.returncode != 0:
             return f"[exit {process.returncode}]\n{stdout}"
@@ -244,17 +264,15 @@ TOOLS = [
             "properties": {
                 "path": {"type": "string", "description": "Path to the file to read"},
                 "offset": {
-                    "type": "integer",
-                    "description": "Line number to start reading from (1-indexed)",
-                    "default": 1,
+                    "type": ["integer", "null"],
+                    "description": "Line number to start reading from (1-indexed). Null means 1.",
                 },
                 "limit": {
-                    "type": "integer",
-                    "description": "Maximum number of lines to read",
-                    "default": 2000,
+                    "type": ["integer", "null"],
+                    "description": "Maximum number of lines to read. Null means 2000.",
                 },
             },
-            "required": ["path"],
+            "required": ["path", "offset", "limit"],
             "additionalProperties": False,
         },
         "strict": True,
@@ -307,9 +325,9 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "pattern": {"type": "string", "description": "Regular expression to search for"},
-                "include": {"type": "string", "description": "Filename glob, such as *.py", "default": "*"},
+                "include": {"type": ["string", "null"], "description": "Filename glob, such as *.py. Null means all files."},
             },
-            "required": ["pattern"],
+            "required": ["pattern", "include"],
             "additionalProperties": False,
         },
         "strict": True,
@@ -326,12 +344,11 @@ TOOLS = [
                     "description": "Bash command to execute",
                 },
                 "timeout": {
-                    "type": "integer",
-                    "description": "Timeout in seconds (optional)",
-                    "default": None,
+                    "type": ["integer", "null"],
+                    "description": "Timeout in seconds. Null means 60.",
                 },
             },
-            "required": ["command"],
+            "required": ["command", "timeout"],
             "additionalProperties": False,
         },
         "strict": True,
@@ -532,13 +549,12 @@ def compact_session(session: dict, client: OpenAI, focus: str = "") -> str:
         prompt += f"\nFocus: {focus}"
     history = list(session.get("history", [])) + [{"role": "user", "content": prompt}]
     if session.get("api_mode", API_MODE) == "responses":
-        response = client.responses.create(model=session["model"], instructions=SYSTEM_PROMPT, input=_trim_history(history), tools=[])
+        response = client.responses.create(model=session["model"], instructions=SYSTEM_PROMPT, input=_trim_history(history))
         summary = response.output_text
     else:
         response = client.chat.completions.create(
             model=session["model"],
             messages=[{"role": "system", "content": SYSTEM_PROMPT}, *history],
-            tools=[],
         )
         summary = response.choices[0].message.content
     if not summary:
@@ -589,11 +605,12 @@ def load_session(session_id: str) -> dict:
     return ensure_session_defaults(session)
 
 
-def load_resume_session(session_id: str) -> dict:
-    """Load a session and validate that it can be resumed under the current API mode."""
+def load_resume_session(session_id: str, api_mode: str | None = None) -> dict:
+    """Load a session and validate that its history format matches the active API mode."""
     session = load_session(session_id)
-    if session.get("api_mode", "responses") != API_MODE:
-        raise ValueError("cannot resume a session created with a different K_API_MODE")
+    active_mode = api_mode or API_MODE
+    if session.get("api_mode", "responses") != active_mode:
+        raise ValueError(f"cannot resume a {session.get('api_mode', 'responses')} session in {active_mode} mode")
     return session
 
 
@@ -675,12 +692,14 @@ SYSTEM_PROMPT = """You are an expert coding assistant. You help users with codin
 
 Available tools:
 - read: Read file contents
+- grep: Search project files with a regular expression
 - bash: Execute bash commands
 - edit: Make surgical edits to files
 - write: Create or overwrite files
 
 Guidelines:
-- Use bash for file operations like ls, grep, find
+- Use grep to search file contents
+- Use bash for file operations like ls, find
 - Use read to examine files before editing
 - Use edit for precise changes (old text must match exactly)
 - Use write only for new files or complete rewrites
@@ -716,7 +735,8 @@ def dispatch_tool(name: str, arguments: str, call_id: str, session_id: str | Non
     if on_activity:
         on_activity(name)
     try:
-        result = handler(**args)
+        # Strict schemas send null for an unused optional argument.
+        result = handler(**{key: value for key, value in args.items() if value is not None})
     except Exception as e:
         return {
             "type": "function_call_output",
@@ -732,20 +752,20 @@ def dispatch_tool(name: str, arguments: str, call_id: str, session_id: str | Non
     }
 
 
-def _git(args: list[str], data: str | None = None) -> str | None:
+def _git(args: list[str], data: str | None = None, cwd: str | None = None) -> str | None:
+    # Bytes mode with surrogateescape keeps CRLF and non-UTF-8 patch content intact.
     try:
         result = subprocess.run(
             ["git", *args],
-            cwd=Path.cwd(),
-            text=True,
-            input=data,
+            cwd=cwd or Path.cwd(),
+            input=None if data is None else data.encode("utf-8", "surrogateescape"),
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             check=False,
         )
     except OSError:
         return None
-    return result.stdout if result.returncode == 0 else None
+    return result.stdout.decode("utf-8", "surrogateescape") if result.returncode == 0 else None
 
 
 def _git_root() -> str | None:
@@ -754,12 +774,12 @@ def _git_root() -> str | None:
 
 
 def begin_undo_checkpoint() -> dict | None:
-    if _git(["status", "--porcelain"]) != "":
-        return None
     root = _git_root()
-    patch = _git(["diff", "--binary", "HEAD"])
-    untracked = _git(["ls-files", "--others", "--exclude-standard"])
-    if root is None or patch is None or untracked is None:
+    if root is None or _git(["status", "--porcelain"], cwd=root) != "":
+        return None
+    patch = _git(["diff", "--binary", "HEAD"], cwd=root)
+    untracked = _git(["ls-files", "--others", "--exclude-standard"], cwd=root)
+    if patch is None or untracked is None:
         return None
     return {"root": root, "patch": patch, "untracked": sorted(set(untracked.splitlines()))}
 
@@ -774,9 +794,9 @@ def finish_undo_checkpoint(checkpoint: dict | None) -> dict | None:
         return None
     if _git_root() != root:
         return None
-    patch = _git(["diff", "--binary", "HEAD"])
-    index_patch = _git(["diff", "--binary", "--cached", "HEAD"])
-    untracked = _git(["ls-files", "--others", "--exclude-standard"])
+    patch = _git(["diff", "--binary", "HEAD"], cwd=root)
+    index_patch = _git(["diff", "--binary", "--cached", "HEAD"], cwd=root)
+    untracked = _git(["ls-files", "--others", "--exclude-standard"], cwd=root)
     if patch is None or index_patch is None or untracked is None:
         return None
     post_untracked = set(untracked.splitlines())
@@ -802,16 +822,16 @@ def apply_undo(record: dict | None) -> str:
         return "Undo unavailable: no checkpoint."
     if _git_root() != root:
         return "Undo unavailable: checkpoint is for a different repository."
-    current_patch = _git(["diff", "--binary", "HEAD"])
-    current_index_patch = _git(["diff", "--binary", "--cached", "HEAD"])
-    current_untracked = _git(["ls-files", "--others", "--exclude-standard"])
+    current_patch = _git(["diff", "--binary", "HEAD"], cwd=root)
+    current_index_patch = _git(["diff", "--binary", "--cached", "HEAD"], cwd=root)
+    current_untracked = _git(["ls-files", "--others", "--exclude-standard"], cwd=root)
     if current_patch is None or current_index_patch is None or current_untracked is None:
         return "Undo unavailable: no checkpoint."
     if current_patch != patch or current_index_patch != index_patch or set(current_untracked.splitlines()) != set(untracked):
         return "Undo refused: worktree changed since the turn."
-    if patch and _git(["apply", "--reverse", "--binary"], patch) is None:
+    if patch and _git(["apply", "--reverse", "--binary"], patch, cwd=root) is None:
         return "Undo failed: patch could not be applied."
-    if index_patch and _git(["apply", "--reverse", "--binary", "--cached"], index_patch) is None:
+    if index_patch and _git(["apply", "--reverse", "--binary", "--cached"], index_patch, cwd=root) is None:
         return "Undo failed: patch could not be applied."
     root_path = Path(root).resolve()
     for name in untracked:
@@ -980,7 +1000,10 @@ class StreamAssembler:
             self._text_parts.append(str(event.get("text", "")))
         elif kind == "tool_start":
             index = int(event.get("index", 0))
-            self._calls[index] = {"id": str(event.get("id", "")), "name": str(event.get("name", "")), "arguments": ""}
+            # Some providers repeat the id or name in later deltas, so keep the arguments.
+            call = self._calls.setdefault(index, {"id": "", "name": "", "arguments": ""})
+            call["id"] = str(event.get("id") or call["id"])
+            call["name"] = str(event.get("name") or call["name"])
         elif kind == "tool_arguments_delta":
             index = int(event.get("index", 0))
             call = self._calls.setdefault(index, {"id": "", "name": "", "arguments": ""})
@@ -990,7 +1013,7 @@ class StreamAssembler:
         return "".join(self._text_parts)
 
     def tool_calls(self) -> list[dict[str, str]]:
-        return [self._calls[index] for index in sorted(self._calls)]
+        return [{**self._calls[index], "id": self._calls[index]["id"] or f"call_{uuid4().hex}"} for index in sorted(self._calls)]
 
 
 def run_agent(
@@ -1025,13 +1048,12 @@ def run_agent(
 
 
 def _trim_history(history: list) -> list:
-    if len(history) <= MAX_HISTORY_ITEMS:
-        return history
     trimmed = history[-MAX_HISTORY_ITEMS:]
 
+    # Also runs on short histories, to repair sessions saved with a leading orphan.
     def is_orphan(item: object) -> bool:
         if isinstance(item, dict):
-            return item.get("role") == "tool" or item.get("type") == "function_call"
+            return item.get("role") == "tool" or item.get("type") in {"function_call", "function_call_output"}
         return getattr(item, "type", None) == "function_call"
 
     while trimmed and is_orphan(trimmed[0]):
@@ -1070,8 +1092,9 @@ def _stream_chat_turn(
         model=model, messages=[{"role": "system", "content": instructions}, *_trim_history(history)], tools=CHAT_TOOLS, stream=True
     )
     for chunk in stream_response:
-        choice = chunk.choices[0]
-        delta = choice.delta
+        if not chunk.choices:
+            continue
+        delta = chunk.choices[0].delta
         text = getattr(delta, "content", None)
         if text:
             assembler.consume({"type": "text_delta", "text": text})
@@ -1118,9 +1141,8 @@ def run_responses_agent(
             if tool_turns > MAX_AGENT_TOOL_TURNS:
                 raise RuntimeError(f"agent exceeded {MAX_AGENT_TOOL_TURNS} tool turns")
             for call in streamed_calls:
-                call_id = call["id"] or f"stream-{tool_turns}"
-                history.append({"type": "function_call", "call_id": call_id, "name": call["name"], "arguments": call["arguments"]})
-                history.append(dispatch_tool(call["name"], call["arguments"], call_id, session_id, confirm_bash=confirm_bash, on_activity=on_activity))
+                history.append({"type": "function_call", "call_id": call["id"], "name": call["name"], "arguments": call["arguments"]})
+                history.append(dispatch_tool(call["name"], call["arguments"], call["id"], session_id, confirm_bash=confirm_bash, on_activity=on_activity))
             continue
         response = client.responses.create(model=model, instructions=instructions, input=list(_trim_history(history)), tools=TOOLS)
         output = getattr(response, "output", None)
@@ -1146,6 +1168,20 @@ def run_responses_agent(
         if not quiet:
             for call in calls:
                 render("tool", f"{call.name}({call.arguments})")
+
+
+def _append_chat_results(history: list[object], results: list[dict]) -> None:
+    # Chat tool messages hold only text. Images go in one user message after all
+    # results, because tool messages must directly follow the assistant message.
+    images = []
+    for result in results:
+        output = result["output"]
+        if isinstance(output, list):
+            images.extend({"type": "image_url", "image_url": {"url": part["image_url"]}} for part in output)
+            output = "Image attached in the next message."
+        history.append({"role": "tool", "tool_call_id": result["call_id"], "content": output})
+    if images:
+        history.append({"role": "user", "content": images})
 
 
 def run_chat_agent(
@@ -1195,10 +1231,10 @@ def run_chat_agent(
                 {"id": call["id"], "type": "function", "function": {"name": call["name"], "arguments": call["arguments"]}} for call in streamed_calls
             ]
             history.append({"role": "assistant", "content": None, "tool_calls": assistant_calls})
-            for call in streamed_calls:
-                call_id = call["id"] or f"stream-{tool_turns}"
-                result = dispatch_tool(call["name"], call["arguments"], call_id, session_id, confirm_bash=confirm_bash, on_activity=on_activity)
-                history.append({"role": "tool", "tool_call_id": call_id, "content": result["output"]})
+            _append_chat_results(
+                history,
+                [dispatch_tool(call["name"], call["arguments"], call["id"], session_id, confirm_bash=confirm_bash, on_activity=on_activity) for call in streamed_calls],
+            )
             continue
         response = client.chat.completions.create(
             model=model, messages=[{"role": "system", "content": instructions}, *_trim_history(history)], tools=CHAT_TOOLS
@@ -1237,10 +1273,12 @@ def run_chat_agent(
         tool_turns += 1
         if tool_turns > MAX_AGENT_TOOL_TURNS:
             raise RuntimeError(f"agent exceeded {MAX_AGENT_TOOL_TURNS} tool turns")
-        for call in calls:
-            result = dispatch_tool(call.function.name, call.function.arguments, call.id, session_id, confirm_bash=confirm_bash, on_activity=on_activity)
-            history.append({"role": "tool", "tool_call_id": call.id, "content": result["output"]})
-            if not quiet:
+        _append_chat_results(
+            history,
+            [dispatch_tool(call.function.name, call.function.arguments, call.id, session_id, confirm_bash=confirm_bash, on_activity=on_activity) for call in calls],
+        )
+        if not quiet:
+            for call in calls:
                 render("tool", f"{call.function.name}({call.function.arguments})")
 
 
@@ -1258,13 +1296,6 @@ def main() -> None:
     parser.add_argument("--display", choices=("formatted", "stream"), help="response display mode")
     args, extra = parser.parse_known_args()
     set_theme(args.theme)
-    session = {"id": new_session_id(), "history": [], "transcript": []}
-    if args.resume:
-        try:
-            session = load_resume_session(args.resume)
-        except ValueError as error:
-            render("output", f"Error: {error}")
-    ensure_session_defaults(session)
     config = load_config()
     defaults = config.get("defaults", {})
     if not isinstance(defaults, dict):
@@ -1278,9 +1309,19 @@ def main() -> None:
         parser.error(str(error))
     if selected_api_mode not in {"responses", "chat-completions"}:
         parser.error("api_mode must be 'responses' or 'chat-completions'")
-    base_url = defaults.get("base_url")
+    session = {"id": new_session_id(), "history": [], "transcript": []}
+    is_resumed = False
+    if args.resume:
+        try:
+            session = load_resume_session(args.resume, selected_api_mode)
+            is_resumed = True
+        except ValueError as error:
+            render("output", f"Error: {error}")
+    ensure_session_defaults(session)
+    base_url = os.getenv("OPENAI_BASE_URL") or defaults.get("base_url")
     client = OpenAI(base_url=base_url) if isinstance(base_url, str) and base_url else OpenAI()
-    session["model"] = selected_model
+    if not is_resumed:
+        session["model"] = selected_model
     session["api_mode"] = selected_api_mode
     session["permission_mode"] = selected_permission_mode
     session["display_mode"] = selected_display_mode
@@ -1298,16 +1339,14 @@ def main() -> None:
             model=session["model"],
             quiet=True,
             api_mode=session["api_mode"],
-            confirm_bash=(lambda _: True) if selected_permission_mode == "yolo" else None,
+            confirm_bash=(lambda _: True) if args.mode == "yolo" else None,
         )
         print(answer)
         return
 
     def allow_bash(command: str) -> bool:
-        if session["permission_mode"] == "yolo":
-            return True
         if not sys.stdin.isatty() or not sys.stdout.isatty():
-            return False
+            return args.mode == "yolo" and session["permission_mode"] == "yolo"
         return confirm_bash(command, session["permission_mode"])
 
     def on_activity(activity: str) -> None:
@@ -1358,10 +1397,12 @@ def main() -> None:
                         render("info", format_session_list(list_sessions()))
                     elif len(parts) == 2:
                         try:
-                            resumed = load_resume_session(parts[1])
+                            resumed = load_resume_session(parts[1], session["api_mode"])
                         except ValueError as error:
                             render("output", f"Error: {error}")
                         else:
+                            # A saved session must not turn off shell approval.
+                            resumed["permission_mode"] = session["permission_mode"]
                             session = resumed
                             session["cwd"] = str(Path.cwd())
                             save_session(session)
@@ -1394,6 +1435,8 @@ def main() -> None:
                         render("output", "Usage: /preset <name>" if not name else f"Unknown preset: {name}")
                     elif preset.get("api_mode", session.get("api_mode")) not in {"responses", "chat-completions"}:
                         render("output", "Preset api_mode must be 'responses' or 'chat-completions'")
+                    elif session["history"] and preset.get("api_mode", session["api_mode"]) != session["api_mode"]:
+                        render("output", "Preset uses a different API mode, which cannot read this history. Use /new first.")
                     else:
                         session["model"] = preset.get("model", session["model"])
                         session["api_mode"] = preset.get("api_mode", session.get("api_mode", API_MODE))
